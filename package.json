@@ -10,10 +10,13 @@
   },
   "devDependencies": {
     "@ardudeck/module-sdk": "github:rubenCodeforges/ardudeck#ef7c1c684550a342065839e51f57b452d30e471d&path:packages/module-sdk",
-    "@types/node": "^20.0.0",
+    "@types/node": "20",
     "@types/react": "^18.2.0",
     "esbuild": "^0.20.0",
     "react": "^18.3.1",
     "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
   }
 }

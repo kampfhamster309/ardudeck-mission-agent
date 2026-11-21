@@ -7,12 +7,16 @@ settings:
 importers:
 
   .:
+    dependencies:
+      yaml:
+        specifier: ^2.9.1
+        version: 2.9.1
     devDependencies:
       '@ardudeck/module-sdk':
         specifier: github:rubenCodeforges/ardudeck#ef7c1c684550a342065839e51f57b452d30e471d&path:packages/module-sdk
         version: https://codeload.github.com/rubenCodeforges/ardudeck/tar.gz/ef7c1c684550a342065839e51f57b452d30e471d#path:packages/module-sdk(esbuild@0.20.2)
       '@types/node':
-        specifier: ^20.0.0
+        specifier: '20'
         version: 20.19.43
       '@types/react':
         specifier: ^18.2.0
@@ -212,6 +216,11 @@ packages:
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
+  yaml@2.9.1:
+    resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
+    engines: {node: '>= 14.6'}
+    hasBin: true
+
 snapshots:
 
   '@ardudeck/module-sdk@https://codeload.github.com/rubenCodeforges/ardudeck/tar.gz/ef7c1c684550a342065839e51f57b452d30e471d#path:packages/module-sdk(esbuild@0.20.2)':
@@ -339,3 +348,5 @@ snapshots:
   typescript@5.9.3: {}
 
   undici-types@6.21.0: {}
+
+  yaml@2.9.1: {}
