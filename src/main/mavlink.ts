@@ -13,10 +13,12 @@ export const MSG = {
   VFR_HUD: 74,
   SET_POSITION_TARGET_LOCAL_NED: 84,
   SET_POSITION_TARGET_GLOBAL_INT: 86,
+  COMMAND_LONG: 76,
+  COMMAND_ACK: 77,
 } as const;
 
-const CRC_EXTRA: Record<number, number> = { 0: 50, 33: 104, 74: 20, 84: 143, 86: 5 };
-const PAYLOAD_LEN: Record<number, number> = { 0: 9, 33: 28, 74: 20, 84: 53, 86: 53 };
+const CRC_EXTRA: Record<number, number> = { 0: 50, 33: 104, 74: 20, 76: 152, 77: 143, 84: 143, 86: 5 };
+const PAYLOAD_LEN: Record<number, number> = { 0: 9, 33: 28, 74: 20, 76: 33, 77: 3, 84: 53, 86: 53 };
 
 export function crcX25(bytes: Uint8Array, crc = 0xffff): number {
   for (const b of bytes) {
@@ -120,6 +122,18 @@ export function setpointPayload(msgid: 84 | 86, f: SetpointFields): Uint8Array {
   b[50] = f.targetSystem;
   b[51] = f.targetComponent;
   b[52] = f.frame;
+  return b;
+}
+
+/** COMMAND_LONG (76): seven float params, command, target, confirmation. */
+export function commandLongPayload(f: { command: number; params: number[]; targetSystem: number; targetComponent: number }): Uint8Array {
+  const b = new Uint8Array(33);
+  const v = new DataView(b.buffer);
+  for (let i = 0; i < 7; i++) v.setFloat32(i * 4, f.params[i] ?? 0, true);
+  v.setUint16(28, f.command, true);
+  b[30] = f.targetSystem;
+  b[31] = f.targetComponent;
+  b[32] = 0; // confirmation
   return b;
 }
 

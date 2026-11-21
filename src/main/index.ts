@@ -9,7 +9,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { MainHostApi, MavlinkFrame, VehicleSetpoint, VehicleSetpointResult } from '@ardudeck/module-sdk';
-import { MavLink, MSG, setpointPayload } from './mavlink.js';
+import { MavLink, MSG, commandLongPayload, setpointPayload } from './mavlink.js';
 import { motionRefusal } from './gate.js';
 
 const PORT = Number(process.env['JETROVER_AGENT_PORT'] ?? 8765);
@@ -70,6 +70,36 @@ async function setpoint(sp: VehicleSetpoint): Promise<VehicleSetpointResult> {
       vx: 0, vy: 0, vz: 0, yawRate: 0,
     }));
   return ok ? { ok: true } : { ok: false, error: 'agent link is closed' };
+}
+
+const MAV_CMD_DO_CHANGE_SPEED = 178;
+const ACK_TIMEOUT_MS = 1500;
+const pendingAcks = new Map<number, (result: number) => void>();
+
+/**
+ * Set the Guided speed (MAV_CMD_DO_CHANGE_SPEED, ground speed in m/s). ArduRover applies it to
+ * position targets in Guided, so `goto` respects the mission's speed limit.
+ */
+async function changeSpeed(speedMps: number): Promise<{ ok: boolean; error?: string }> {
+  if (!(speedMps > 0) || !Number.isFinite(speedMps)) return { ok: false, error: 'speed must be a positive number' };
+  const params = [1, speedMps, -1, 0]; // ground speed, m/s, throttle unchanged, absolute
+  const hs = host.vehicle.getGuidedState();
+  if (hs.connected && hs.vehicleClass !== 'other') {
+    const r = await host.vehicle.command({ command: MAV_CMD_DO_CHANGE_SPEED, params });
+    return r.ok ? { ok: true } : { ok: false, error: r.error ?? 'refused' };
+  }
+  if (!link) return { ok: false, error: 'agent link not open' };
+  const refusal = motionRefusal({ now: Date.now(), heartbeats: link.heartbeats, host: hs });
+  if (refusal) return { ok: false, error: refusal };
+  const ack = new Promise<number | null>((resolve) => {
+    const timer = setTimeout(() => { pendingAcks.delete(MAV_CMD_DO_CHANGE_SPEED); resolve(null); }, ACK_TIMEOUT_MS);
+    pendingAcks.set(MAV_CMD_DO_CHANGE_SPEED, (r) => { clearTimeout(timer); resolve(r); });
+  });
+  const sent = await link.send(MSG.COMMAND_LONG, commandLongPayload({ command: MAV_CMD_DO_CHANGE_SPEED, params, targetSystem: hs.sysid!, targetComponent: 1 }));
+  if (!sent) { pendingAcks.delete(MAV_CMD_DO_CHANGE_SPEED); return { ok: false, error: 'agent link is closed' }; }
+  const result = await ack;
+  if (result === null) return { ok: false, error: 'no answer from the vehicle to the speed change' };
+  return result === 0 ? { ok: true } : { ok: false, error: `vehicle refused the speed change (MAV_RESULT ${result})` };
 }
 
 /** MAVLink 2 trims trailing zero bytes from payloads: pad before reading fixed offsets. */
@@ -148,10 +178,19 @@ async function velocity(forward: number, yawRate: number, seconds: number) {
   return { sent, error: firstError, cancelled: run.cancelled, ...status() };
 }
 
-async function goto(lat: number, lon: number) {
-  startBehaviour(`goto ${lat.toFixed(6)}, ${lon.toFixed(6)}`);
+async function goto(lat: number, lon: number, speedMps?: number) {
+  startBehaviour(`goto ${lat.toFixed(6)}, ${lon.toFixed(6)}${speedMps ? ` at ${speedMps} m/s` : ''}`);
   const r = await setpoint({ kind: 'positionGlobal', latitude: lat, longitude: lon, altitude: 0 });
-  return { ...r, target: { lat, lon }, ...status() };
+  if (!r.ok || speedMps === undefined) return { ...r, target: { lat, lon }, speed_mps: null, ...status() };
+  // ArduRover only accepts DO_CHANGE_SPEED in Guided once it is driving to a target (verified in
+  // SITL: refused with MAV_RESULT_FAILED before), so the target goes first. If the speed can't be
+  // set, stop at once rather than let the rover run at cruise speed.
+  const sp = await changeSpeed(speedMps);
+  if (!sp.ok) {
+    await stop();
+    return { ok: false, error: `stopped: ${sp.error}`, target: { lat, lon }, ...status() };
+  }
+  return { ...r, target: { lat, lon }, speed_mps: speedMps, ...status() };
 }
 
 async function stop() {
@@ -188,12 +227,13 @@ async function route(req: IncomingMessage): Promise<unknown> {
     case '/velocity':
       return velocity(num(b['forward'], 'forward'), num(b['yawRate'] ?? 0, 'yawRate'), num(b['seconds'], 'seconds'));
     case '/goto': {
+      const speed = b['speed'] === undefined ? undefined : num(b['speed'], 'speed');
       if (b['north'] !== undefined || b['east'] !== undefined) {
         if (telemetry.lat === undefined || telemetry.lon === undefined) throw new Error('no position yet');
         const t = offset(telemetry.lat, telemetry.lon, num(b['north'] ?? 0, 'north'), num(b['east'] ?? 0, 'east'));
-        return goto(t.lat, t.lon);
+        return goto(t.lat, t.lon, speed);
       }
-      return goto(num(b['lat'], 'lat'), num(b['lon'], 'lon'));
+      return goto(num(b['lat'], 'lat'), num(b['lon'], 'lon'), speed);
     }
     case '/stop':
       return stop();
@@ -218,6 +258,12 @@ export async function activate(h: MainHostApi) {
   host = h;
   unsubscribe = host.mavlink.subscribe([0, 33, 74], onFrame);
   link = new MavLink(MAV_BIND_HOST ?? '0.0.0.0', Number(MAV_BIND_PORT ?? 14562));
+  link.onFrame = (f) => {
+    if (f.msgid === MSG.COMMAND_ACK) {
+      const resolve = pendingAcks.get(f.payload.getUint16(0, true));
+      if (resolve) { pendingAcks.delete(f.payload.getUint16(0, true)); resolve(f.payload.getUint8(2)); }
+    }
+  };
   link.open((msg) => host.log('info', msg));
   host.onRendererMessage('status', () => status());
   host.onRendererMessage('stop', () => stop());

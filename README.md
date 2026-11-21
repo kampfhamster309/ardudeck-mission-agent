@@ -4,9 +4,9 @@ An add-on module for the [Ardudeck](https://github.com/rubenCodeforges/ardudeck)
 that lets an agent plan and drive missions for a tracked ArduRover UGV (the jetrover), next to
 Ardudeck's regular mission planning.
 
-Status: early. Driving works end to end in ArduRover SITL; mission planning works from the
-command line. The planning panel inside Ardudeck, the remaining behaviours and perception are
-still to come.
+Status: early. Planning, compiling and executing missions work end to end in ArduRover SITL
+from the command line (goto, velocity and stop behaviours). The planning panel inside
+Ardudeck, the remaining behaviours (survey, approach, push) and perception are still to come.
 
 ## What it does
 
@@ -53,7 +53,8 @@ folder, `~/.config/@ardudeck/desktop/` on Linux), then start Ardudeck from sourc
 {"devModules":[{"slug":"dev.jetrover.mission-agent","name":"Jetrover Mission Agent","version":"0.1.0","path":"/absolute/path/to/ardudeck-mission-agent/dist"}]}
 ```
 
-Ardudeck watches the folder and reloads the module when `dist/` changes. On Linux, Electron's
+Ardudeck watches the folder and reloads the module's panel when `dist/` changes, but **not its
+main side** (Node caches the import): after changing `src/main/`, restart Ardudeck. On Linux, Electron's
 `chrome-sandbox` in Ardudeck's `node_modules/electron/dist/` must be owned by root with mode
 4755, or Ardudeck won't start.
 
@@ -70,7 +71,7 @@ agent:
 |---|---|---|
 | `GET /status` | | gate state, why driving is refused, agent link, telemetry, running behaviour |
 | `POST /velocity` | `{"forward": 1.0, "yawRate": 0, "seconds": 5}` | body-frame speed (m/s) and turn rate (rad/s) at 10 Hz |
-| `POST /goto` | `{"lat": .., "lon": ..}` or `{"north": 10, "east": 5}` | Guided position target, absolute or metres from the current position |
+| `POST /goto` | `{"lat": .., "lon": .., "speed": 0.5}` or `{"north": 10, "east": 5}` | Guided position target, absolute or metres from the current position; optional ground speed in m/s (`DO_CHANGE_SPEED`, sent right after the target; if the vehicle refuses it, the rover is stopped) |
 | `POST /stop` | `{}` | cancels the running behaviour, sends zero velocity |
 
 A new behaviour cancels the running one. Refusals come back as `{"error": "vehicle is not in
@@ -167,6 +168,35 @@ Site and target names are resolved from the sites file (`../rover/sites.yaml`): 
 with a boundary polygon (used as the geofence) and named points, as `[lat, lon]`. See
 `rover/sites.example.yaml` in the jetrover project for the format.
 
+### Running a mission
+
+`scripts/run.ts` executes a compiled spec through the control port (Ardudeck running, module
+loaded, connected to the vehicle):
+
+```sh
+node scripts/run.ts red-balls [--from p3] [--agent http://127.0.0.1:8765] [--no-llm]
+```
+
+* Refuses a spec whose plan changed after compiling, or a plan that is no longer approved.
+* Prints the operator's pre-flight checklist and which abort conditions it watches itself
+  (geofence, mission time, overspeed, stale telemetry / link) and which it can't.
+* Starts when the operator arms and switches to GUIDED; pauses whenever the rover isn't
+  drivable (operator took over, link lost) and restarts the interrupted step after the
+  handback; aborts after a 10-minute pause.
+* Each step runs its behaviour with built-in completion and a timeout: `goto` is done within
+  the arrival radius (default 2 m) and stopped, at no more than the mission's speed limit;
+  `velocity` after its duration; `stop` at once.
+* When a step fails, the rover is stopped and the LLM decides (`prompts/decision.md`, with the
+  spec briefing as context): retry, skip, hold for the operator, or abort. Retries are capped
+  (2 by default); without an answer or with `--no-llm` the mission holds. Continue a held
+  mission with `--from <step>`.
+* Logs every event to `<missions>/<id>/runs/<timestamp>/events.jsonl` and the outcome, per step
+  and per success criterion, to `result.json`.
+
+`scripts/sitl-mission.ts` builds, approves and compiles a small test mission for ArduRover
+SITL (`sitl-square`: three corners of a 15 m square at 0.5 m/s, a turn in place, home) without
+the LLM.
+
 ### The capability model
 
 `rover/capabilities.yaml` (in the jetrover project, outside this repo) describes the rover:
@@ -196,6 +226,9 @@ are skipped.
 | `src/main/gate.ts` | when the agent may move the rover |
 | `src/renderer/index.tsx` | status panel |
 | `src/planning/` | plan format, checks, LLM client, planner and validator, spec compiler |
-| `prompts/` | planner and validator prompts |
+| `prompts/` | planner, validator and decision prompts |
+| `src/executor/` | mission executor, control-port client, LLM decision point |
 | `scripts/plan.ts` | planning CLI |
+| `scripts/run.ts` | executes a compiled mission |
+| `scripts/sitl-mission.ts` | builds the SITL test mission |
 | `esbuild.config.mjs` | builds `dist/` |

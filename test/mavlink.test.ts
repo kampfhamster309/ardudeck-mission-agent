@@ -1,12 +1,18 @@
 // Run: node --test test/   (Node 22 strips the types)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decode, encodeV2, setpointPayload, MSG } from '../src/main/mavlink.ts';
+import { commandLongPayload, decode, encodeV2, setpointPayload, MSG } from '../src/main/mavlink.ts';
 import { motionRefusal } from '../src/main/gate.ts';
 
 // Reference frames from pymavlink (MAVLink 2, seq 0, sysid 255, compid 191).
 const PYMAVLINK_VEL = process.env['PYMAVLINK_VEL'];
 const PYMAVLINK_POS = process.env['PYMAVLINK_POS'];
+const PYMAVLINK_CMD = process.env['PYMAVLINK_CMD'];
+
+test('DO_CHANGE_SPEED command matches pymavlink', { skip: !PYMAVLINK_CMD }, () => {
+  const f = encodeV2(MSG.COMMAND_LONG, commandLongPayload({ command: 178, params: [1, 0.5, -1, 0], targetSystem: 1, targetComponent: 1 }), 0, 255, 191);
+  assert.equal(Buffer.from(f).toString('hex'), PYMAVLINK_CMD);
+});
 
 const vel = () => encodeV2(MSG.SET_POSITION_TARGET_LOCAL_NED, setpointPayload(84, {
   targetSystem: 1, targetComponent: 1, frame: 9, typeMask: 1479,
