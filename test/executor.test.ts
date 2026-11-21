@@ -11,6 +11,7 @@ class FakeRover implements AgentClient {
   lat = 51.5;
   lon = 7.5;
   speed = 0;
+  heading = 0;
   target: { lat: number; lon: number; speed: number } | null = null;
   canDrive = true;
   stuck = false;
@@ -30,6 +31,7 @@ class FakeRover implements AgentClient {
       const d = Math.hypot(dn, de);
       const step = this.target.speed * 0.1;
       if (d <= step) { this.lat = this.target.lat; this.lon = this.target.lon; this.target = null; this.speed = 0; continue; }
+      this.heading = ((Math.atan2(de, dn) * 180) / Math.PI + 360) % 360;
       this.lat += (dn / d) * step / 111_320;
       this.lon += (de / d) * step / (111_320 * Math.cos((this.lat * Math.PI) / 180));
       this.speed = this.target.speed;
@@ -38,7 +40,7 @@ class FakeRover implements AgentClient {
   drivable() { return this.canDrive && !this.takeovers.some(([a, b]) => this.t >= a && this.t < b); }
   async status(): Promise<AgentStatus> {
     const ok = this.drivable();
-    return { canDrive: ok, refusal: ok ? null : 'vehicle is not in Guided mode', telemetry: { lat: this.lat, lon: this.lon, groundspeed: this.speed, at: this.t }, behaviour: null };
+    return { canDrive: ok, refusal: ok ? null : 'vehicle is not in Guided mode', telemetry: { lat: this.lat, lon: this.lon, heading: this.heading, groundspeed: this.speed, at: this.t }, behaviour: null };
   }
   async goto(lat: number, lon: number, speed = 1) { if (!this.drivable()) return { ok: false, error: 'vehicle is not in Guided mode' }; this.target = { lat, lon, speed }; return { ok: true }; }
   async velocity(_f: number, _y: number, seconds: number) { this.advance(seconds * 1000); return { ok: true, sent: seconds * 10, error: null }; }
@@ -131,7 +133,7 @@ test('a failed step goes to the decider: retry, then skip', async () => {
 test('retries are capped, then the mission holds; unknown behaviours fail into a decision', async () => {
   const rover = new FakeRover();
   const h = harness(rover, async () => ({ action: 'retry', reason: 'again', by: 'llm' }));
-  const r = await runMission(spec([{ id: 'p1', name: 'push', behaviour: 'push_to', params: {}, exit: '', on_failure: '', serves: ['s1'] }]), { ...h.opts, maxRetries: 2 });
+  const r = await runMission(spec([{ id: 'p1', name: 'jump', behaviour: 'teleport', params: {}, exit: '', on_failure: '', serves: ['s1'] }]), { ...h.opts, maxRetries: 2 });
   assert.equal(r.status, 'held');
   assert.match(r.reason!, /not implemented in the executor/);
   assert.equal(r.steps[0]!.attempts, 3);

@@ -19,7 +19,7 @@ function describeTelemetry(t: Record<string, unknown> | undefined): string {
 
 export function llmDecider(chat: ChatFn, log?: (s: string) => void): DecideFn {
   const system = readFileSync(new URL('../../prompts/decision.md', import.meta.url), 'utf-8');
-  return async ({ spec, step, attempt, maxRetries, failure, status }) => {
+  return async ({ spec, step, attempt, maxRetries, failure, status, object }) => {
     let decision: Decision | null = null;
     const user = [
       renderSpecMarkdown(spec),
@@ -27,6 +27,7 @@ export function llmDecider(chat: ChatFn, log?: (s: string) => void): DecideFn {
       `## Decision needed`,
       '',
       `Step **${step.id} ${step.name}** (\`${step.behaviour}\`) failed on attempt ${attempt} (${Math.max(0, maxRetries + 1 - attempt)} retries left).`,
+      ...(object ? [`Working on object ${object.id} at (${object.lat.toFixed(6)}, ${object.lon.toFixed(6)}); this step runs once per found object, so "retry" starts the object's block again and "skip" gives up on this object and moves on to the next.`] : []),
       `On failure, the spec says: ${step.on_failure}`,
       `What happened: ${failure}`,
       `Rover drivable by the agent right now: ${status ? (status.canDrive ? 'yes (armed, GUIDED)' : `no (${status.refusal})`) : 'unknown (module unreachable)'}`,

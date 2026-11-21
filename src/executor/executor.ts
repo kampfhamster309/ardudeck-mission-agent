@@ -1,18 +1,22 @@
 // Mission executor: runs a compiled mission spec as a deterministic state machine.
 //
-// * Each step runs its behaviour with built-in completion and a timeout (goto: within the arrival
-//   radius and stopped; velocity: after its duration; stop: at once).
+// * Each step runs its behaviour (behaviours.ts) with built-in completion and a timeout.
 // * Monitors run on every poll: geofence, mission time, overspeed, stale telemetry.
 // * The operator owns the handover: the run starts when the rover is armed and in Guided and
 //   pauses whenever it isn't (the module's gate refuses then anyway); the interrupted step
 //   restarts when the operator hands back.
+// * Blocks: consecutive steps with `params.for_each: "object"` and the same `params.block` run
+//   once per found object (nearest first), e.g. approach -> push_to -> back_off per ball.
 // * The LLM is only asked at decision points (a step failed): retry, skip, hold for the
-//   operator, or abort. Without an answer the executor holds.
+//   operator, or abort. Without an answer the executor holds. Inside a block, retry restarts
+//   the block for the same object and skip gives up on that object.
 // The executor never arms, disarms or changes modes; "stop" means zero velocity in Guided.
 
 import type { MissionSpec, SpecStep } from '../planning/spec.ts';
 import type { AgentClient, AgentStatus } from './client.ts';
-import { distanceM, insidePolygon } from './geo.ts';
+import { insidePolygon, distanceM } from './geo.ts';
+import { blindPerception, type PerceptionClient } from './perception.ts';
+import { Abort, BEHAVIOURS, ObjectRegistry, Restart, type Ctx, type StepOutcome, type TrackedObject } from './behaviours.ts';
 
 export type DecisionAction = 'retry' | 'skip' | 'hold' | 'abort';
 export interface Decision { action: DecisionAction; reason: string; by: 'llm' | 'policy' }
@@ -23,6 +27,8 @@ export interface DecisionContext {
   maxRetries: number;
   failure: string;
   status: AgentStatus | null;
+  /** The object a for_each block was working on. */
+  object?: { id: string; lat: number; lon: number } | null;
 }
 export type DecideFn = (ctx: DecisionContext) => Promise<Decision>;
 
@@ -31,6 +37,7 @@ export interface MissionEvent { t: number; type: string; [k: string]: unknown }
 export interface RunOptions {
   client: AgentClient;
   decide: DecideFn;
+  perception?: PerceptionClient;
   log?: (e: MissionEvent) => void;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -45,26 +52,18 @@ export interface RunOptions {
   staleMs?: number;
 }
 
-export interface StepResult { id: string; outcome: 'done' | 'skipped' | 'failed'; attempts: number; detail?: string }
+export interface StepResult { id: string; object?: string; outcome: 'done' | 'skipped' | 'failed'; attempts: number; detail?: string }
 export interface RunResult {
   status: 'completed' | 'aborted' | 'held' | 'not_started';
   reason?: string;
   steps: StepResult[];
+  objects: TrackedObject[];
   criteria: Array<{ id: string; served_by: string[]; all_steps_done: boolean }>;
   monitored: string[];
   unmonitored: string[];
   started_at: number;
   ended_at: number;
 }
-
-type StepOutcome =
-  | { kind: 'done'; detail?: string }
-  | { kind: 'failed'; failure: string }
-  | { kind: 'restart' } // paused and handed back: run the step again, not counted as an attempt
-  | { kind: 'abort'; reason: string };
-
-class Abort extends Error {}
-class Restart extends Error {}
 
 /** Which of the spec's abort conditions the executor watches itself, and which it can't. */
 export function classifyAborts(spec: MissionSpec): { monitored: string[]; unmonitored: string[] } {
@@ -81,8 +80,6 @@ export function classifyAborts(spec: MissionSpec): { monitored: string[]; unmoni
   return { monitored, unmonitored };
 }
 
-const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
-
 export async function runMission(spec: MissionSpec, opts: RunOptions): Promise<RunResult> {
   const now = opts.now ?? Date.now;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -98,15 +95,22 @@ export async function runMission(spec: MissionSpec, opts: RunOptions): Promise<R
   const { monitored, unmonitored } = classifyAborts(spec);
   const results: StepResult[] = [];
   let lastStatus: AgentStatus | null = null;
+  const objects = new ObjectRegistry();
 
   const finish = (status: RunResult['status'], reason?: string): RunResult => {
     const criteria = spec.success.map((c) => {
       const served = spec.steps.filter((s) => s.serves.includes(c.id)).map((s) => s.id);
-      const all = served.length > 0 && served.every((id) => results.find((r) => r.id === id)?.outcome === 'done');
+      // every serving step must have run, and every run of it (one per object) must be done
+      const all = served.length > 0 && served.every((id) => {
+        // runs on dismissed objects (false sightings) don't count
+        const dismissed = new Set(results.filter((r) => r.outcome === 'skipped' && /false sighting|not found where expected/.test(r.detail ?? '')).map((r) => r.object));
+        const runs = results.filter((r) => r.id === id && !(r.object && dismissed.has(r.object)));
+        return runs.length > 0 && runs.every((r) => r.outcome === 'done');
+      });
       return { id: c.id, served_by: served, all_steps_done: all };
     });
-    const r: RunResult = { status, ...(reason ? { reason } : {}), steps: results, criteria, monitored, unmonitored, started_at: started, ended_at: now() };
-    log('end', { status, reason, criteria });
+    const r: RunResult = { status, ...(reason ? { reason } : {}), steps: results, objects: objects.objects, criteria, monitored, unmonitored, started_at: started, ended_at: now() };
+    log('end', { status, ...(reason ? { reason } : {}), criteria });
     return r;
   };
 
@@ -117,7 +121,7 @@ export async function runMission(spec: MissionSpec, opts: RunOptions): Promise<R
 
   log('start', { mission: spec.mission, plan_hash: spec.plan_hash, steps: spec.steps.map((s) => s.id), monitored, unmonitored });
 
-  // --- handover --------------------------------------------------------------------------
+  // --- handover ----------------------------------------------------------------------------
   const handoverDeadline = now() + (opts.handoverTimeoutMs ?? 10 * 60_000);
   log('waiting_for_handover', { hint: 'operator: arm and switch to GUIDED' });
   for (;;) {
@@ -128,10 +132,7 @@ export async function runMission(spec: MissionSpec, opts: RunOptions): Promise<R
   }
   log('handover', {});
 
-  /**
-   * One poll: read status, run the monitors. Throws Abort for mission-ending conditions and
-   * Restart after a pause the operator ended by handing back.
-   */
+  // --- monitors ----------------------------------------------------------------------------
   let overspeedPolls = 0;
   const guard = async (): Promise<AgentStatus> => {
     let st: AgentStatus | null = null;
@@ -165,62 +166,16 @@ export async function runMission(spec: MissionSpec, opts: RunOptions): Promise<R
     return st;
   };
 
-  // --- behaviours ------------------------------------------------------------------------
-  const runGoto = async (step: SpecStep): Promise<StepOutcome> => {
-    const p = step.params;
-    const t = (p['target'] ?? p['destination'] ?? p['waypoint']) as { lat?: number; lon?: number } | undefined;
-    const lat = num(t?.lat) ?? num(p['lat']);
-    const lon = num(t?.lon) ?? num(p['lon']);
-    if (lat === undefined || lon === undefined) return { kind: 'failed', failure: 'goto has no target coordinates' };
-    const speed = Math.min(num(p['max_speed_mps']) ?? num(p['speed_mps']) ?? spec.limits.max_speed_mps, spec.limits.max_speed_mps);
-    const radius = num(p['arrival_radius_m']) ?? 2.0;
-    const st0 = await guard();
-    const d0 = st0.telemetry.lat !== undefined ? distanceM(st0.telemetry.lat, st0.telemetry.lon!, lat, lon) : 0;
-    const timeoutMs = (num(p['timeout_s']) ?? d0 / speed * 2.5 + 20) * 1000;
-    const r = await client.goto(lat, lon, speed);
-    if (r.ok === false) return { kind: 'failed', failure: `goto refused: ${r.error ?? 'unknown'}` };
-    log('goto', { step: step.id, lat, lon, speed, radius, distance_m: Math.round(d0 * 10) / 10 });
-    const deadline = now() + timeoutMs;
-    for (;;) {
-      await sleep(pollMs);
-      const st = await guard();
-      const { lat: la, lon: lo, groundspeed } = st.telemetry;
-      if (la !== undefined && lo !== undefined) {
-        const d = distanceM(la, lo, lat, lon);
-        if (d <= radius && (groundspeed ?? 0) < 0.3) return { kind: 'done', detail: `arrived, ${d.toFixed(1)} m from target` };
-        if (now() > deadline) return { kind: 'failed', failure: `did not arrive within ${Math.round(timeoutMs / 1000)} s, ${d.toFixed(1)} m left` };
-      } else if (now() > deadline) {
-        return { kind: 'failed', failure: 'no position telemetry' };
-      }
-    }
-  };
-
-  const runVelocity = async (step: SpecStep): Promise<StepOutcome> => {
-    const p = step.params;
-    const limit = spec.limits.max_speed_mps;
-    const forward = Math.max(-limit, Math.min(limit, num(p['forward_mps']) ?? num(p['forward']) ?? 0));
-    const yaw = num(p['yaw_rate_rps']) ?? num(p['yawRate']) ?? 0;
-    const seconds = num(p['seconds']) ?? num(p['duration_s']);
-    if (seconds === undefined || seconds <= 0) return { kind: 'failed', failure: 'velocity has no duration' };
-    let remaining = seconds;
-    while (remaining > 0) {
-      await guard();
-      const chunk = Math.min(1, remaining);
-      const r = await client.velocity(forward, yaw, chunk);
-      if (r.error) return { kind: 'failed', failure: `velocity refused: ${r.error}` };
-      remaining -= chunk;
-    }
-    return { kind: 'done', detail: `${seconds} s at ${forward} m/s, ${yaw} rad/s` };
+  const ctx: Ctx = {
+    spec, client, perception: opts.perception ?? blindPerception, objects, current: null, ferretSeen: false, keepOut: [],
+    guard, log, now, sleep, pollMs,
   };
 
   const runStep = async (step: SpecStep): Promise<StepOutcome> => {
+    const behaviour = BEHAVIOURS[step.behaviour];
+    if (!behaviour) return { kind: 'failed', failure: `behaviour "${step.behaviour}" is not implemented in the executor` };
     try {
-      switch (step.behaviour) {
-        case 'goto': return await runGoto(step);
-        case 'velocity': return await runVelocity(step);
-        case 'stop': await guard(); await client.stop(); return { kind: 'done' };
-        default: return { kind: 'failed', failure: `behaviour "${step.behaviour}" is not implemented in the executor` };
-      }
+      return await behaviour(ctx, step);
     } catch (err) {
       if (err instanceof Restart) return { kind: 'restart' };
       if (err instanceof Abort) return { kind: 'abort', reason: err.message };
@@ -228,39 +183,46 @@ export async function runMission(spec: MissionSpec, opts: RunOptions): Promise<R
     }
   };
 
-  // --- steps -----------------------------------------------------------------------------
-  let start = 0;
-  if (opts.fromStep) {
-    start = spec.steps.findIndex((s) => s.id === opts.fromStep);
-    if (start < 0) return finish('not_started', `no step "${opts.fromStep}"`);
-  }
-
-  for (const step of spec.steps.slice(start)) {
-    let attempt = 1;
+  /**
+   * Run one step until done, with pause restarts and decisions on failure.
+   * 'next' = carry on; 'retry_block' = start the enclosing block again; 'skip_object';
+   * or a final run status.
+   */
+  type Flow = { flow: 'next' } | { flow: 'retry_block' } | { flow: 'skip_object' } | { flow: 'dismiss_object' } | { flow: 'end'; status: RunResult['status']; reason: string };
+  const attempts = new Map<string, number>();
+  const execute = async (step: SpecStep, inBlock: boolean): Promise<Flow> => {
+    const key = `${step.id}#${ctx.current?.id ?? ''}`;
     let restarts = 0;
     for (;;) {
-      log('step_start', { step: step.id, name: step.name, behaviour: step.behaviour, attempt });
+      const attempt = attempts.get(key) ?? 1;
+      log('step_start', { step: step.id, name: step.name, behaviour: step.behaviour, attempt, ...(ctx.current ? { object: ctx.current.id } : {}) });
       const out = await runStep(step);
+      const base = { id: step.id, ...(ctx.current ? { object: ctx.current.id } : {}), attempts: attempt };
       if (out.kind === 'done') {
-        results.push({ id: step.id, outcome: 'done', attempts: attempt, ...(out.detail ? { detail: out.detail } : {}) });
-        log('step_done', { step: step.id, detail: out.detail });
-        break;
+        results.push({ ...base, outcome: 'done', ...(out.detail ? { detail: out.detail } : {}) });
+        log('step_done', { step: step.id, ...(out.detail ? { detail: out.detail } : {}) });
+        return { flow: 'next' };
+      }
+      if (out.kind === 'dismiss') {
+        results.push({ ...base, outcome: 'skipped', detail: out.reason });
+        log('object_dismissed', { step: step.id, reason: out.reason });
+        if (inBlock) return { flow: 'dismiss_object' };
+        return { flow: 'next' };
       }
       if (out.kind === 'abort') {
         await stopRover(out.reason);
-        results.push({ id: step.id, outcome: 'failed', attempts: attempt, detail: out.reason });
-        return finish('aborted', out.reason);
+        results.push({ ...base, outcome: 'failed', detail: out.reason });
+        return { flow: 'end', status: 'aborted', reason: out.reason };
       }
       if (out.kind === 'restart') {
-        if (++restarts > 20) { await stopRover('too many restarts'); return finish('aborted', `step ${step.id} restarted too often`); }
+        if (++restarts > 20) { await stopRover('too many restarts'); return { flow: 'end', status: 'aborted', reason: `step ${step.id} restarted too often` }; }
         continue;
       }
-      // failed: stop the rover, then ask
       await stopRover(`step ${step.id} failed`);
       log('step_failed', { step: step.id, attempt, failure: out.failure });
       let decision: Decision;
       try {
-        decision = await opts.decide({ spec, step, attempt, maxRetries, failure: out.failure, status: lastStatus });
+        decision = await opts.decide({ spec, step, attempt, maxRetries, failure: out.failure, status: lastStatus, object: ctx.current });
       } catch (err) {
         decision = { action: 'hold', reason: `no decision (${(err as Error).message})`, by: 'policy' };
       }
@@ -268,14 +230,65 @@ export async function runMission(spec: MissionSpec, opts: RunOptions): Promise<R
         decision = { action: 'hold', reason: `retry refused: ${maxRetries} retries used (${decision.reason})`, by: 'policy' };
       }
       log('decision', { step: step.id, ...decision });
-      if (decision.action === 'retry') { attempt++; continue; }
-      if (decision.action === 'skip') {
-        results.push({ id: step.id, outcome: 'skipped', attempts: attempt, detail: `${out.failure}; skipped: ${decision.reason}` });
-        break;
+      if (decision.action === 'retry') {
+        attempts.set(key, attempt + 1);
+        if (inBlock) return { flow: 'retry_block' };
+        continue;
       }
-      results.push({ id: step.id, outcome: 'failed', attempts: attempt, detail: out.failure });
-      return finish(decision.action === 'abort' ? 'aborted' : 'held', `${step.id}: ${out.failure} (${decision.reason})`);
+      if (decision.action === 'skip') {
+        results.push({ ...base, outcome: 'skipped', detail: `${out.failure}; skipped: ${decision.reason}` });
+        return inBlock ? { flow: 'skip_object' } : { flow: 'next' };
+      }
+      results.push({ ...base, outcome: 'failed', detail: out.failure });
+      return { flow: 'end', status: decision.action === 'abort' ? 'aborted' : 'held', reason: `${step.id}: ${out.failure} (${decision.reason})` };
     }
+  };
+
+  // --- steps ---------------------------------------------------------------------------------
+  let i = 0;
+  if (opts.fromStep) {
+    i = spec.steps.findIndex((s) => s.id === opts.fromStep);
+    if (i < 0) return finish('not_started', `no step "${opts.fromStep}"`);
+  }
+  while (i < spec.steps.length) {
+    const step = spec.steps[i]!;
+    if (step.params['for_each'] !== 'object') {
+      const f = await execute(step, false);
+      if (f.flow === 'end') return finish(f.status, f.reason);
+      i++;
+      continue;
+    }
+
+    // a block: this step and the following ones with the same block id, once per object
+    const blockId = step.params['block'] ?? step.id;
+    let j = i;
+    while (j < spec.steps.length && (spec.steps[j]!.params['block'] ?? spec.steps[j]!.id) === blockId) j++;
+    const block = spec.steps.slice(i, j);
+    log('block_start', { block: blockId, steps: block.map((s) => s.id), objects: objects.confirmed().filter((o) => o.status === 'found').length });
+    const tried = new Set<string>();
+    for (;;) {
+      const st = lastStatus?.telemetry;
+      const todo = objects.confirmed().filter((o) => o.status === 'found' && !tried.has(o.id));
+      if (!todo.length) break;
+      // nearest first
+      if (st?.lat !== undefined && st.lon !== undefined) todo.sort((a, b) => distanceM(st.lat!, st.lon!, a.lat, a.lon) - distanceM(st.lat!, st.lon!, b.lat, b.lon));
+      const obj = todo[0]!;
+      ctx.current = obj;
+      log('object_start', { object: obj.id, lat: obj.lat, lon: obj.lon });
+      let k = 0;
+      while (k < block.length) {
+        const f = await execute(block[k]!, true);
+        if (f.flow === 'end') { ctx.current = null; return finish(f.status, f.reason); }
+        if (f.flow === 'retry_block') { k = 0; continue; }
+        if (f.flow === 'skip_object') { if (obj.status !== 'delivered') obj.status = 'skipped'; break; }
+        if (f.flow === 'dismiss_object') break;
+        k++;
+      }
+      tried.add(obj.id);
+      log('object_end', { object: obj.id, status: obj.status });
+      ctx.current = null;
+    }
+    i = j;
   }
   return finish('completed');
 }

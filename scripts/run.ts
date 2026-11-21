@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Execute a compiled mission spec through the module's control port.
 //
-//   node scripts/run.ts <id> [--from <step>] [--agent http://127.0.0.1:8765] [--no-llm]
+//   node scripts/run.ts <id> [--from <step>] [--agent http://127.0.0.1:8765]
+//                            [--perception http://127.0.0.1:8766] [--no-llm]
 //
 // Needs Ardudeck running with the module loaded and connected to the vehicle. The run starts
 // when the operator arms and switches to GUIDED; any other mode pauses it. Decisions after a
@@ -17,6 +18,7 @@ import { planHash, type MissionSpec } from '../src/planning/spec.ts';
 import { llmConfigFromEnv, openAiChat } from '../src/planning/llm.ts';
 import { runMission, classifyAborts, type MissionEvent } from '../src/executor/executor.ts';
 import { HttpAgentClient } from '../src/executor/client.ts';
+import { HttpPerceptionClient } from '../src/executor/perception.ts';
 import { holdDecider, llmDecider } from '../src/executor/decide.ts';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -30,7 +32,7 @@ function arg(name: string): string | undefined {
 async function main() {
   const id = process.argv[2];
   if (!id || id.startsWith('--')) {
-    console.log(readFileSync(fileURLToPath(import.meta.url), 'utf-8').split('\n').slice(1, 10).join('\n').replace(/^\/\/ ?/gm, ''));
+    console.log(readFileSync(fileURLToPath(import.meta.url), 'utf-8').split('\n').slice(1, 11).join('\n').replace(/^\/\/ ?/gm, ''));
     return;
   }
   const dir = join(missionDir, id);
@@ -71,6 +73,7 @@ async function main() {
 
   const result = await runMission(spec, {
     client: new HttpAgentClient(arg('--agent')),
+    perception: new HttpPerceptionClient(arg('--perception')),
     decide,
     log: show,
     fromStep: arg('--from'),

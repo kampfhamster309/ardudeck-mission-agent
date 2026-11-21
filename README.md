@@ -5,8 +5,9 @@ that lets an agent plan and drive missions for a tracked ArduRover UGV (the jetr
 Ardudeck's regular mission planning.
 
 Status: early. Planning, compiling and executing missions work end to end in ArduRover SITL
-from the command line (goto, velocity and stop behaviours). The planning panel inside
-Ardudeck, the remaining behaviours (survey, approach, push) and perception are still to come.
+from the command line, including a red-ball mission (survey, approach, push each ball into a
+corner, verify) against a simulated world. Still to come: the planning panel inside Ardudeck,
+real perception on the rover, gimbal panning.
 
 ## What it does
 
@@ -183,9 +184,24 @@ node scripts/run.ts red-balls [--from p3] [--agent http://127.0.0.1:8765] [--no-
 * Starts when the operator arms and switches to GUIDED; pauses whenever the rover isn't
   drivable (operator took over, link lost) and restarts the interrupted step after the
   handback; aborts after a 10-minute pause.
-* Each step runs its behaviour with built-in completion and a timeout: `goto` is done within
-  the arrival radius (default 2 m) and stopped, at no more than the mission's speed limit;
-  `velocity` after its duration; `stop` at once.
+* Each step runs its behaviour with built-in completion and a timeout:
+
+  | Behaviour | Does |
+  |---|---|
+  | `goto` | drive to a point at no more than the speed limit; done within the arrival radius (2 m) and stopped; routes around keep-out zones |
+  | `velocity` | body speed and turn rate for a duration |
+  | `stop` | zero velocity |
+  | `survey` | lawnmower legs inside the geofence (2 m apart: the camera looks forward only), mapping camera detections to objects; keeps out of the target zone, sidesteps known objects, registers a ball it scoops up; `mode: verify` fails if anything is outside the target zone |
+  | `hold_and_look` | turn in place and look around |
+  | `approach` | drive to the current object: stand-off point behind it (seen from `align_to`), then camera visual servoing, the Ferret for the last 0.7 m (without it, the last stretch is dead-reckoned); an object never seen during the approach is dismissed as moved or a false sighting |
+  | `push_to` | push the object in the plow mouth to a target, turning gently; fails if the Ferret sees the ball leave the plow |
+  | `back_off` | reverse (1 m by default) |
+
+* Steps with `for_each: object` and the same `block` run once per found object, nearest first
+  (approach, push, back off per ball). Inside a block, a retry starts the block again for the
+  same object and a skip moves on to the next one.
+* Perception comes from `--perception` (default `http://127.0.0.1:8766`, `GET /detections`):
+  in SITL the simulated world, on the rover a perception service serving the same thing.
 * When a step fails, the rover is stopped and the LLM decides (`prompts/decision.md`, with the
   spec briefing as context): retry, skip, hold for the operator, or abort. Retries are capped
   (2 by default); without an answer or with `--no-llm` the mission holds. Continue a held
@@ -193,9 +209,15 @@ node scripts/run.ts red-balls [--from p3] [--agent http://127.0.0.1:8765] [--no-
 * Logs every event to `<missions>/<id>/runs/<timestamp>/events.jsonl` and the outcome, per step
   and per success criterion, to `result.json`.
 
-`scripts/sitl-mission.ts` builds, approves and compiles a small test mission for ArduRover
-SITL (`sitl-square`: three corners of a 15 m square at 0.5 m/s, a turn in place, home) without
-the LLM.
+`scripts/sitl-mission.ts` builds, approves and compiles test missions for ArduRover SITL
+without the LLM: `sitl-square` (three corners of a 15 m square, a turn in place, home) and
+`sitl-balls` (find the balls, push each into the corner, verify, home).
+
+`scripts/sim-world.ts` is the simulated world for SITL (`sim/world.ts`): red balls, a camera
+model (45° horizontal, 0.5-6 m, noise, misses), a Ferret model (0.15-0.7 m, sees into the plow
+mouth; `--no-ferret`) and pushing physics with or without a plow (`--no-plow`). It follows the
+rover through the control port and serves `GET /detections`, `GET /world` (ground truth, with
+each ball's distance from the drop corner) and `POST /reset`.
 
 ### The capability model
 
@@ -227,7 +249,9 @@ are skipped.
 | `src/renderer/index.tsx` | status panel |
 | `src/planning/` | plan format, checks, LLM client, planner and validator, spec compiler |
 | `prompts/` | planner, validator and decision prompts |
-| `src/executor/` | mission executor, control-port client, LLM decision point |
+| `src/executor/` | mission executor, behaviours, control-port and perception clients, LLM decision point |
+| `sim/world.ts` | simulated world: balls, camera and Ferret models, plow physics |
+| `scripts/sim-world.ts` | serves the simulated world for SITL |
 | `scripts/plan.ts` | planning CLI |
 | `scripts/run.ts` | executes a compiled mission |
 | `scripts/sitl-mission.ts` | builds the SITL test mission |

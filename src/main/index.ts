@@ -170,8 +170,10 @@ async function velocity(forward: number, yawRate: number, seconds: number) {
   while (Date.now() < end && !run.cancelled) {
     const r = await setpoint(sp);
     if (r.ok) sent++;
-    else if (!firstError) firstError = r.error ?? 'refused';
-    if (!r.ok && r.error !== 'too fast') break; // gate refused: stop, don't keep hammering
+    else if (r.error !== 'too fast') { // a skipped tick (< 20 ms since the last setpoint) isn't an error
+      firstError ??= r.error ?? 'refused';
+      break; // gate refused: stop, don't keep hammering
+    }
     await sleep(1000 / SETPOINT_HZ);
   }
   if (current === run) current = null;
