@@ -1,0 +1,10 @@
+{
+  "manifestVersion": 1,
+  "slug": "dev.jetrover.mission-agent",
+  "name": "Jetrover Mission Agent",
+  "version": "0.1.0",
+  "entry": { "main": "main.js", "renderer": "renderer.js" },
+  "mountPoints": [],
+  "permissions": ["vehicleControl", "network"],
+  "minArduDeckVersion": "0.1.3"
+}
