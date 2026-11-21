@@ -9,6 +9,7 @@
 //   node scripts/plan.ts refine <id> <slot> "<brief>"      planner reworks one section, validate
 //   node scripts/plan.ts validate <id> [--no-llm]
 //   node scripts/plan.ts approve <id>
+//   node scripts/plan.ts compile <id>                      approved plan -> spec.yaml + spec.md, or blockers
 //
 // Env: MISSION_LLM_URL, MISSION_LLM_MODEL (OpenAI-compatible), optional MISSION_LLM_KEY, MISSION_LLM_MAX_TOKENS,
 //      MISSION_CAPS (default ../rover/capabilities.yaml), MISSION_SITES (default ../rover/sites.yaml),
@@ -21,6 +22,8 @@ import { parse as parseYaml } from 'yaml';
 import { answerQuestion, approve, newPlan, renderMarkdown, requestRefine, setProse, type MissionPlan } from '../src/planning/plan.ts';
 import { runPlannerRound, runValidation, type Context } from '../src/planning/agents.ts';
 import { llmConfigFromEnv, openAiChat } from '../src/planning/llm.ts';
+import { compileSpec, renderSpecMarkdown, type SitesFile } from '../src/planning/spec.ts';
+import { stringify as toYaml } from 'yaml';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const capsPath = resolve(repo, process.env['MISSION_CAPS'] ?? '../rover/capabilities.yaml');
@@ -77,7 +80,7 @@ async function plannerThenValidate(plan: MissionPlan) {
 async function main() {
   const [cmd, id, ...rest] = process.argv.slice(2);
   if (!cmd || (!id && cmd !== 'help')) {
-    console.log(readFileSync(fileURLToPath(import.meta.url), 'utf-8').split('\n').slice(1, 13).join('\n').replace(/^\/\/ ?/gm, ''));
+    console.log(readFileSync(fileURLToPath(import.meta.url), 'utf-8').split('\n').slice(1, 14).join('\n').replace(/^\/\/ ?/gm, ''));
     return;
   }
   switch (cmd) {
@@ -127,6 +130,21 @@ async function main() {
       await runValidation(plan, context(), useLlm ? openAiChat(llmConfigFromEnv(), log) : null, log, (t) => saveTranscript(plan, `validator-round-${plan.round}`, t));
       save(plan);
       console.log(renderMarkdown(plan));
+      break;
+    }
+    case 'compile': {
+      const plan = load(id!);
+      const ctx = context();
+      const r = compileSpec(plan, ctx.capabilities, ctx.sites as SitesFile);
+      if (!r.ok) {
+        console.log(`can't compile ${id} yet:\n- ${r.blockers.join('\n- ')}`);
+        process.exitCode = 2;
+        break;
+      }
+      writeFileSync(join(missionDir, plan.id, 'spec.yaml'), toYaml(r.spec, { lineWidth: 100 }));
+      writeFileSync(join(missionDir, plan.id, 'spec.md'), renderSpecMarkdown(r.spec));
+      console.log(renderSpecMarkdown(r.spec));
+      log(`wrote ${join(missionDir, plan.id, 'spec.yaml')} and spec.md`);
       break;
     }
     case 'approve': {

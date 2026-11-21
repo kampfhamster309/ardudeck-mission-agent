@@ -37,6 +37,8 @@ export interface PhaseItem {
   params?: Record<string, unknown>;
   exit_condition: string;
   on_failure: string;
+  /** Success criteria ids this phase serves (traceability into the spec and the mission log). */
+  serves?: string[];
 }
 export interface SafetyItem { condition: string; action: string }
 

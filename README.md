@@ -103,6 +103,7 @@ node scripts/plan.ts refine red-balls phases "Split it into a search-only missio
 node scripts/plan.ts edit red-balls goal "My own words for the goal"
 node scripts/plan.ts validate red-balls [--no-llm]
 node scripts/plan.ts approve red-balls
+node scripts/plan.ts compile red-balls                # approved plan -> spec.yaml + spec.md, or blockers
 ```
 
 | Variable | Default | |
@@ -147,6 +148,25 @@ The two prompts are adapted from Lore's
 (validator), reworked for missions: grounded in the capability model instead of a code
 repository, and with coordinates, distances and speeds as the content rather than kept out.
 
+### The mission spec
+
+Approving a plan means "we agree on this mission". Compiling it means "it can run now":
+`compile` turns an approved plan into the frozen, executable **mission spec**, in code, without
+the LLM. It refuses with a list of blockers while anything can't run on the rover today:
+behaviours that aren't `verified`, configuration needs that are missing or unknown, unresolved
+coordinates or placeholder parameters, phases faster than the speed limit, or vehicle
+preconditions not met (motors on the Pixhawk, `FS_GCS_ENABLE=1`, battery monitoring when a
+battery abort is planned).
+
+The spec comes in two forms: `spec.yaml` for the executor, and `spec.md`, a one-page briefing
+for the LLM at decision points. It records the plan round and a hash of the plan content it
+was compiled from, and each step names the success criteria it serves, so a mission log can be
+scored against them.
+
+Site and target names are resolved from the sites file (`../rover/sites.yaml`): named areas
+with a boundary polygon (used as the geofence) and named points, as `[lat, lon]`. See
+`rover/sites.example.yaml` in the jetrover project for the format.
+
 ### The capability model
 
 `rover/capabilities.yaml` (in the jetrover project, outside this repo) describes the rover:
@@ -175,7 +195,7 @@ are skipped.
 | `src/main/mavlink.ts` | minimal MAVLink v1/v2 codec and UDP link for the agent |
 | `src/main/gate.ts` | when the agent may move the rover |
 | `src/renderer/index.tsx` | status panel |
-| `src/planning/` | plan format, checks, LLM client, planner and validator |
+| `src/planning/` | plan format, checks, LLM client, planner and validator, spec compiler |
 | `prompts/` | planner and validator prompts |
 | `scripts/plan.ts` | planning CLI |
 | `esbuild.config.mjs` | builds `dist/` |

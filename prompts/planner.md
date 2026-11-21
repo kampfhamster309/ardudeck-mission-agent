@@ -62,7 +62,11 @@ data a later step executes). Write both where the section has items.
   `missing`; describe it in the prose (purpose, rough size, where it mounts, what it must not
   block).
 * `phases` — the order of work. Items: `[{id, name, behaviour, params, exit_condition,
-  on_failure}]`. Every phase has an exit condition and a failure action.
+  on_failure, serves}]`. Every phase has an exit condition and a failure action. `serves` lists
+  the success criteria ids the phase works towards (e.g. `["s1"]`); every criterion is served
+  by at least one phase. Params use the behaviour's parameter names from the capabilities;
+  refer to places by their target name (e.g. `"target": "drop_corner"`), never by made-up
+  coordinates.
 * `safety` — when to stop. Items: `[{condition, action}]`. Always cover: link loss to the ground
   station, low battery, lost GPS / position, a person or animal close to the rover, leaving the
   geofence. Actions are HOLD (agent stops) or "operator: RTL / HOLD / take over".
