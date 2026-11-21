@@ -126,7 +126,8 @@ executes): **goal**, **success criteria** (each says how it's measured), **area 
 mission needs and whether the rover has it), **phases** (behaviour, parameters, exit condition,
 failure action) and **abort and safety**.
 
-Rules, adapted from Lore's feature planning and enforced in code (`src/planning/plan.ts`):
+Rules, adapted from [Lore](https://github.com/re-cinq/lore)'s feature planning and enforced in
+code (`src/planning/plan.ts`):
 
 * the planner never overwrites what the operator wrote, it can only add to it;
 * questions are the operator's: the planner adds them, never edits or removes them; answered
@@ -138,6 +139,13 @@ Rules, adapted from Lore's feature planning and enforced in code (`src/planning/
 Findings come from two places: fixed checks in code (`src/planning/checks.ts`) and the LLM
 validator (`prompts/validator.md`), which spends its effort on contradictions and on what the
 rover can't actually do according to the capability model.
+
+The two prompts are adapted from Lore's
+[`plan-analyze.md`](https://github.com/re-cinq/lore/blob/main/libs/shared/src/agent-defaults/plan-analyze.md)
+(planner) and
+[`plan-validate.md`](https://github.com/re-cinq/lore/blob/main/libs/shared/src/agent-defaults/plan-validate.md)
+(validator), reworked for missions: grounded in the capability model instead of a code
+repository, and with coordinates, distances and speeds as the content rather than kept out.
 
 ### The capability model
 
