@@ -35,7 +35,8 @@ export interface DebriefOutput extends LoopResult {
 }
 
 const frontmatter = (meta: Record<string, unknown>) => `---\n${toYaml(meta).trim()}\n---\n`;
-const clean = (s: string) => s.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim() + '\n';
+// the body without frontmatter and without a leading H1 (the tools add the title themselves)
+const clean = (s: string) => s.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '').trim().replace(/^# [^\n]*\n+/, '').trim() + '\n';
 const safeName = (s: string) => s.replace(/[\\/:*?"<>|#^[\]]/g, '-').trim();
 
 export async function runDebrief(dir: string, input: DebriefInput, chat: ChatFn, system: string, log?: (s: string) => void): Promise<DebriefOutput> {

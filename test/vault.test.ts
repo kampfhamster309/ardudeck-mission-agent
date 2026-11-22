@@ -43,7 +43,7 @@ test('debrief writes a proposed run report and lessons; an existing note gets a 
   const script = [
     [{ name: 'vault_search', args: { query: 'push ball front' } }],
     [{ name: 'write_run_report', args: { result: '0 of 3 delivered', body: '---\nstatus: active\n---\nAll pushes failed.' } }],
-    [{ name: 'propose_lesson', args: { path: 'Behaviours/push_to - bare front', body: 'Fails in 3 of 3 pushes.', why: 'p4 x3' } }],
+    [{ name: 'propose_lesson', args: { path: 'Behaviours/push_to - bare front', body: '# push_to - bare front\n\nFails in 3 of 3 pushes.', why: 'p4 x3' } }],
     [{ name: 'propose_lesson', args: { path: 'Strategy/Pushing balls', body: 'Fit an attachment.', why: 'ground truth' } }],
     [{ name: 'propose_lesson', args: { path: 'Elsewhere/x', body: 'x', why: 'x' } }],
     [{ name: 'done', args: {} }],
@@ -67,6 +67,7 @@ test('debrief writes a proposed run report and lessons; an existing note gets a 
   assert.match(readFileSync(join(dir, 'Behaviours', 'push_to - bare front.md'), 'utf-8'), /within 2 s/);
   const edit = readFileSync(join(dir, 'Proposals', 'Behaviours - push_to - bare front (2026-11-22).md'), 'utf-8');
   assert.match(edit, /status: proposed[\s\S]*edit_of: "\[\[Behaviours\/push_to - bare front\]\]"[\s\S]*3 of 3/);
+  assert.equal(edit.match(/^# /gm)?.length, 1, 'one title heading');
   assert.match(edit, /evidence:\n {2}- "\[\[Runs\/2026-11-22 m1 17-25-56\]\]"/);
   assert.ok(existsSync(join(dir, 'Strategy', 'Pushing balls.md')));
   assert.deepEqual(out.proposals, ['Proposals/Behaviours - push_to - bare front (2026-11-22)', 'Strategy/Pushing balls']);
