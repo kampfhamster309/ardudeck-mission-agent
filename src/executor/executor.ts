@@ -65,6 +65,33 @@ export interface RunResult {
   ended_at: number;
 }
 
+/** Per success criterion: did every step serving it run, and every run of it (one per object) end done? */
+export function scoreCriteria(spec: MissionSpec, results: StepResult[]): RunResult['criteria'] {
+  // runs on dismissed objects (false sightings) don't count
+  const dismissed = new Set(results.filter((r) => r.outcome === 'skipped' && /false sighting|not found where expected/.test(r.detail ?? '')).map((r) => r.object));
+  return spec.success.map((c) => {
+    const served = spec.steps.filter((s) => s.serves.includes(c.id)).map((s) => s.id);
+    const all = served.length > 0 && served.every((id) => {
+      const runs = results.filter((r) => r.id === id && !(r.object && dismissed.has(r.object)));
+      return runs.length > 0 && runs.every((r) => r.outcome === 'done');
+    });
+    return { id: c.id, served_by: served, all_steps_done: all };
+  });
+}
+
+/**
+ * The step results of one mission carried out over several runs (held, then resumed with
+ * --from), oldest run first: each step counts as it went in the latest run that ran it.
+ */
+export function mergeRuns(runs: StepResult[][]): StepResult[] {
+  const latest = new Map<string, StepResult[]>();
+  for (const results of runs) {
+    const ids = new Set(results.map((r) => r.id));
+    for (const id of ids) latest.set(id, results.filter((r) => r.id === id));
+  }
+  return [...latest.values()].flat();
+}
+
 /** Which of the spec's abort conditions the executor watches itself, and which it can't. */
 export function classifyAborts(spec: MissionSpec): { monitored: string[]; unmonitored: string[] } {
   const monitored: string[] = [];
@@ -98,17 +125,7 @@ export async function runMission(spec: MissionSpec, opts: RunOptions): Promise<R
   const objects = new ObjectRegistry();
 
   const finish = (status: RunResult['status'], reason?: string): RunResult => {
-    const criteria = spec.success.map((c) => {
-      const served = spec.steps.filter((s) => s.serves.includes(c.id)).map((s) => s.id);
-      // every serving step must have run, and every run of it (one per object) must be done
-      const all = served.length > 0 && served.every((id) => {
-        // runs on dismissed objects (false sightings) don't count
-        const dismissed = new Set(results.filter((r) => r.outcome === 'skipped' && /false sighting|not found where expected/.test(r.detail ?? '')).map((r) => r.object));
-        const runs = results.filter((r) => r.id === id && !(r.object && dismissed.has(r.object)));
-        return runs.length > 0 && runs.every((r) => r.outcome === 'done');
-      });
-      return { id: c.id, served_by: served, all_steps_done: all };
-    });
+    const criteria = scoreCriteria(spec, results);
     const r: RunResult = { status, ...(reason ? { reason } : {}), steps: results, objects: objects.objects, criteria, monitored, unmonitored, started_at: started, ended_at: now() };
     log('end', { status, ...(reason ? { reason } : {}), criteria });
     return r;

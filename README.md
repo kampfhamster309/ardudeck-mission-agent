@@ -108,6 +108,58 @@ node scripts/plan.ts approve red-balls
 node scripts/plan.ts compile red-balls                # approved plan -> spec.yaml + spec.md, or blockers
 ```
 
+The operator can also settle things the planner can't:
+
+```sh
+node scripts/plan.ts waive red-balls v3 "why the finding doesn't apply"     # until the next validation
+node scripts/plan.ts provide red-balls "track width" "measured 350 mm"      # a configuration need is met
+node scripts/plan.ts restore red-balls 5                                     # back to round 5 (rounds/round-N.json)
+```
+
+A waived error no longer blocks approval; `provide` marks a configuration need as available
+(an approved plan goes back to draft). Both are logged in the plan's history, and both come back
+in the spec's pre-flight checklist ("check what you vouched for", "does the waiver still
+hold?"), to be checked against the real vehicle before the handover. They are the operator's
+word, not evidence: in the first full simulation two of three waivers turned out wrong.
+
+### Addons: designed with SolidCraft
+
+When the plan needs an attachment the rover doesn't have (a plow, a bracket), the designer
+builds it with SolidCraft's MCP server (`solidcraft-cli mcp`):
+
+```sh
+node scripts/plan.ts design red-balls                  # design missing attachments
+node scripts/plan.ts design-replay red-balls front_plow # rebuild from the transcript, no LLM
+node scripts/plan.ts fit red-balls ../missions/red-balls/addons/front_plow.json   # it's fitted: add to MISSION_CAPS
+```
+
+Two phases: the model first writes a construction plan (key numbers, build stages with the
+expected volume and bounding box) from a brief made of the plan's need, the rover's front
+mount and the sensors' fields of view; then it builds the part stage by stage with the
+SolidCraft tools, checking each stage (screenshots included), and submits the functional
+dimensions and what it blocks. SolidCraft then measures the result (overall size, each body as
+a printed part against the print bed), and STEP, STL and the `.sc` design go to
+`<mission>/addons/`. `fit` copies the design into the capability model as a verified
+attachment.
+
+To watch the part being built, start SolidCraft with `solidcraft --control 7878` and set
+`SOLIDCRAFT_CONNECT=127.0.0.1:7878`; otherwise the MCP server may build headless (it says so in
+the log, and `design-replay` can rebuild the part in the app later).
+
+`node scripts/plan.ts operator <id> <facts.md>` lets a simulated operator answer open
+questions from a fact sheet (for unattended test runs).
+
+### Full simulation
+
+`scripts/sim-setup.ts <id> [--neutral]` writes a mission's simulation inputs to
+`<missions>/<id>/sim/`: the capability model with SITL overrides (no attachments fitted), the
+sites (a lawn around the SITL home) and the operator's fact sheet. A full run: `new` with the
+mission request, `operator` / `update` rounds until there are no errors, `design`, `fit`,
+`approve`, `compile`, then the SITL run below with `sim-world.ts --addon <design.json>` so the
+simulated plow has the designed geometry. `--neutral` (with `MISSION_PROMPTS=prompts-neutral`
+and `MISSION_ATTACHMENTS=neutral`) removes every hint about plows and pushing from the prompts
+and the capability model, to see what the agents come up with on their own.
+
 | Variable | Default | |
 |---|---|---|
 | `MISSION_LLM_URL` | (required) | OpenAI-compatible base URL, ending in `/v1` |
@@ -117,9 +169,21 @@ node scripts/plan.ts compile red-balls                # approved plan -> spec.ya
 | `MISSION_CAPS` | `../rover/capabilities.yaml` | rover capability model |
 | `MISSION_SITES` | `../rover/sites.yaml` | named places (optional) |
 | `MISSION_DIR` | `../missions` | where plans are stored |
+| `MISSION_LLM_REASONING_EFFORT` | server default | `reasoning_effort` per request; when a model thinks through the whole answer limit without answering, the request is repeated one level lower (down to `medium`) |
+| `MISSION_LLM_TIMEOUT_S` | answer limit / 20 + 300 | per-request timeout |
+| `MISSION_LLM_CONTEXT` | `1000000` | context window, for the token log |
+| `MISSION_DESIGN_PLAN_MAX_TOKENS` | `65536` | the designer's construction-plan request |
+| `MISSION_DESIGN_PLAN_EFFORT` | `high` | its reasoning effort |
+| `MISSION_DESIGNER_VISION` | `1` | `0`: the designer gets no screenshots |
+| `MISSION_PRINT_BED_MM` | `220x220x250` | the printer's build volume, for checking the parts |
+| `MISSION_ATTACHMENTS` | `keywords` | which missing needs go to the designer: named add-ons, or `neutral` (every need nothing on the rover provides) |
+| `MISSION_PROMPTS` | `prompts/` | folder with the agents' prompts |
+| `SOLIDCRAFT_CONNECT` | | `host:port` of a running SolidCraft (`--control`) |
 
 Paths are relative to this repo. Each mission gets a folder with `plan.json` (the stored
-plan), `plan.md` (readable view) and `transcripts/` (the model conversations, for debugging).
+plan), `plan.md` (readable view), `rounds/` (a snapshot per round), `transcripts/` (the model
+conversations, for debugging) and `usage.jsonl` (tokens and time per request; each step prints
+its totals).
 
 ### The plan
 
@@ -188,7 +252,7 @@ node scripts/run.ts red-balls [--from p3] [--agent http://127.0.0.1:8765] [--no-
 
   | Behaviour | Does |
   |---|---|
-  | `goto` | drive to a point at no more than the speed limit; done within the arrival radius (2 m) and stopped; routes around keep-out zones |
+  | `goto` | drive to a point at no more than the speed limit; stops as soon as it is within the arrival radius (2 m; a stand-off), closing the last stretch with velocity if the vehicle parks short (its WP_RADIUS is wider); routes around keep-out zones |
   | `velocity` | body speed and turn rate for a duration |
   | `stop` | zero velocity |
   | `survey` | lawnmower legs inside the geofence (2 m apart: the camera looks forward only), mapping camera detections to objects; keeps out of the target zone, sidesteps known objects, registers a ball it scoops up; `mode: verify` fails if anything is outside the target zone |
@@ -207,7 +271,8 @@ node scripts/run.ts red-balls [--from p3] [--agent http://127.0.0.1:8765] [--no-
   (2 by default); without an answer or with `--no-llm` the mission holds. Continue a held
   mission with `--from <step>`.
 * Logs every event to `<missions>/<id>/runs/<timestamp>/events.jsonl` and the outcome, per step
-  and per success criterion, to `result.json`.
+  and per success criterion, to `result.json`. A resumed run (`--from`) scores the success
+  criteria over itself and the earlier runs it continues.
 
 `scripts/sitl-mission.ts` builds, approves and compiles test missions for ArduRover SITL
 without the LLM: `sitl-square` (three corners of a 15 m square, a turn in place, home) and
@@ -247,12 +312,14 @@ are skipped.
 | `src/main/mavlink.ts` | minimal MAVLink v1/v2 codec and UDP link for the agent |
 | `src/main/gate.ts` | when the agent may move the rover |
 | `src/renderer/index.tsx` | status panel |
-| `src/planning/` | plan format, checks, LLM client, planner and validator, spec compiler |
-| `prompts/` | planner, validator and decision prompts |
+| `src/planning/` | plan format, checks, LLM client, planner and validator, spec compiler, addon designer, MCP client, simulated operator |
+| `prompts/` | planner, validator, designer and decision prompts |
+| `prompts-neutral/` | the same without hints about plows and pushing |
 | `src/executor/` | mission executor, behaviours, control-port and perception clients, LLM decision point |
 | `sim/world.ts` | simulated world: balls, camera and Ferret models, plow physics |
 | `scripts/sim-world.ts` | serves the simulated world for SITL |
 | `scripts/plan.ts` | planning CLI |
 | `scripts/run.ts` | executes a compiled mission |
 | `scripts/sitl-mission.ts` | builds the SITL test mission |
+| `scripts/sim-setup.ts` | writes a mission's full-simulation inputs |
 | `esbuild.config.mjs` | builds `dist/` |

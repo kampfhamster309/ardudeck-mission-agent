@@ -9,14 +9,14 @@
 // failed step go to the LLM (MISSION_LLM_URL / MISSION_LLM_MODEL), or straight to a hold
 // with --no-llm. Each run is logged to <missions>/<id>/runs/<timestamp>/.
 
-import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import type { MissionPlan } from '../src/planning/plan.ts';
 import { planHash, type MissionSpec } from '../src/planning/spec.ts';
-import { llmConfigFromEnv, openAiChat } from '../src/planning/llm.ts';
-import { runMission, classifyAborts, type MissionEvent } from '../src/executor/executor.ts';
+import { formatTotals, llmConfigFromEnv, openAiChat, UsageMeter } from '../src/planning/llm.ts';
+import { runMission, classifyAborts, mergeRuns, scoreCriteria, type MissionEvent, type RunResult, type StepResult } from '../src/executor/executor.ts';
 import { HttpAgentClient } from '../src/executor/client.ts';
 import { HttpPerceptionClient } from '../src/executor/perception.ts';
 import { holdDecider, llmDecider } from '../src/executor/decide.ts';
@@ -61,7 +61,9 @@ async function main() {
 
   const useLlm = !process.argv.includes('--no-llm');
   const quiet = (s: string) => appendFileSync(join(runDir, 'llm.log'), s + '\n');
-  const decide = useLlm ? llmDecider(openAiChat(llmConfigFromEnv(), quiet), quiet) : holdDecider;
+  const meter = new UsageMeter(join(runDir, 'usage.jsonl'));
+  meter.start('decisions');
+  const decide = useLlm ? llmDecider(openAiChat(llmConfigFromEnv(), quiet, meter.record), quiet) : holdDecider;
   const t0 = Date.now();
   const show = (e: MissionEvent) => {
     appendFileSync(events, JSON.stringify(e) + '\n');
@@ -78,17 +80,48 @@ async function main() {
     log: show,
     fromStep: arg('--from'),
   });
-  writeFileSync(join(runDir, 'result.json'), JSON.stringify(result, null, 2) + '\n');
+  const from = arg('--from');
+  writeFileSync(join(runDir, 'result.json'), JSON.stringify({ ...result, plan_hash: spec.plan_hash, ...(from ? { from } : {}) }, null, 2) + '\n');
 
   console.log(`\n${result.status.toUpperCase()}${result.reason ? `: ${result.reason}` : ''}`);
   for (const s of result.steps) console.log(`  ${s.id.padEnd(5)} ${s.outcome.padEnd(8)} ${s.attempts} attempt(s)${s.detail ? `  ${s.detail}` : ''}`);
-  console.log('Success criteria (steps serving them all done?):');
-  for (const c of result.criteria) console.log(`  ${c.id.padEnd(5)} ${c.all_steps_done ? 'yes' : 'no '}  served by ${c.served_by.join(', ') || 'nothing'}`);
+  // resumed with --from: score the mission over this run and the earlier ones it continues
+  const chain = from ? earlierRuns(join(dir, 'runs'), runDir, spec) : [];
+  const criteria = chain.length ? scoreCriteria(spec, mergeRuns([...chain.map((c) => c.steps), result.steps])) : result.criteria;
+  console.log(`Success criteria (steps serving them all done?${chain.length ? `, over this run and ${chain.length} earlier one(s): ${chain.map((c) => c.name).join(', ')}` : ''}):`);
+  for (const c of criteria) console.log(`  ${c.id.padEnd(5)} ${c.all_steps_done ? 'yes' : 'no '}  served by ${c.served_by.join(', ') || 'nothing'}`);
+  if (meter.totals.requests) console.log(`LLM decisions: ${formatTotals(meter.totals)}`);
   if (result.status === 'held') {
     const failed = result.steps.at(-1)?.id;
     console.log(`\nHeld for the operator. To continue from the failed step: node scripts/run.ts ${id} --from ${failed}`);
   }
   process.exitCode = result.status === 'completed' ? 0 : 1;
+}
+
+/**
+ * The runs a resumed run continues: earlier runs of the same spec (plan hash), newest first, back
+ * to the one that started at the first step. Returned oldest first.
+ */
+function earlierRuns(runsDir: string, current: string, spec: MissionSpec): Array<{ name: string; steps: StepResult[] }> {
+  const out: Array<{ name: string; steps: StepResult[] }> = [];
+  const names = readdirSync(runsDir).filter((n) => join(runsDir, n) !== current).sort().reverse();
+  for (const name of names) {
+    const file = join(runsDir, name, 'result.json');
+    if (!existsSync(file)) continue;
+    const r = JSON.parse(readFileSync(file, 'utf-8')) as RunResult & { plan_hash?: string; from?: string };
+    const hash = r.plan_hash ?? planHashOfEvents(join(runsDir, name, 'events.jsonl'));
+    if (hash !== spec.plan_hash) break;
+    out.unshift({ name, steps: r.steps });
+    const startedAtFirst = r.from === undefined && r.steps[0]?.id === spec.steps[0]?.id;
+    if (startedAtFirst) break;
+  }
+  return out;
+}
+
+function planHashOfEvents(file: string): string | undefined {
+  if (!existsSync(file)) return undefined;
+  const first = readFileSync(file, 'utf-8').split('\n')[0];
+  try { return (JSON.parse(first ?? '') as { plan_hash?: string }).plan_hash; } catch { return undefined; }
 }
 
 main().catch((err: Error) => {

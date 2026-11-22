@@ -1,6 +1,6 @@
 // The planner and validator agents: their tools, and one round of each.
 
-import { readFileSync } from 'node:fs';
+import { loadPrompt } from './prompts.ts';
 import {
   SLOTS, addQuestion, appendProse, setItems, setProse,
   type Finding, type FindingKind, type MissionPlan,
@@ -17,7 +17,7 @@ export interface Context {
   sitesText: string;
 }
 
-const prompt = (name: string) => readFileSync(new URL(`../../prompts/${name}.md`, import.meta.url), 'utf-8');
+const prompt = (name: string) => loadPrompt(name);
 
 /** The plan as the agents see it: everything but the history. */
 function planView(plan: MissionPlan): string {

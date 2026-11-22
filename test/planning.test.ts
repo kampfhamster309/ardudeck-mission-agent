@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  addQuestion, answerQuestion, appendProse, approvalBlockers, approve, newPlan, PlanEditError,
+  addQuestion, answerQuestion, appendProse, approvalBlockers, approve, newPlan, PlanEditError, provideNeed, waiveFinding,
   renderMarkdown, setItems, setProse,
 } from '../src/planning/plan.ts';
 import { runChecks } from '../src/planning/checks.ts';
@@ -53,7 +53,7 @@ test('checks find the fixed-checklist problems', () => {
   const p = newPlan('m1', 'x');
   setProse(p, 'phases', 'p', 'planner');
   setItems(p, 'phases', [
-    { id: 'p1', name: 'search lawn', behaviour: 'survey', params: { sensor: 'ferret' }, exit_condition: '', on_failure: 'HOLD' },
+    { id: 'p1', name: 'search lawn', behaviour: 'survey', params: { sensor: 'ferret', target: 'nowhere' }, exit_condition: '', on_failure: 'HOLD' },
     { id: 'p2', name: 'fly', behaviour: 'teleport', exit_condition: 'there', on_failure: 'HOLD' },
     { id: 'p3', name: 'arm it', behaviour: 'arm', exit_condition: 'armed', on_failure: 'HOLD' },
   ], 'planner');
@@ -71,6 +71,7 @@ test('checks find the fixed-checklist problems', () => {
   has(/error the vehicle has the GCS failsafe off/);
   has(/error a battery abort condition can't fire/);
   has(/error no geofence/);
+  has(/phase p1: target "nowhere" is not one of the area's targets/);
 });
 
 test('planner round and validation with a scripted model', async () => {
@@ -99,4 +100,33 @@ test('planner round and validation with a scripted model', async () => {
   const f = await runValidation(p, ctx, chat);
   assert.ok(f.some((x) => x.id === 'v1' && x.source === 'validator'));
   assert.match(renderMarkdown(p), /q1 \(open\)/);
+});
+
+test('a waived error finding no longer blocks approval, and the waiver is shown and logged', () => {
+  const p = newPlan('m1', 'x');
+  for (const s of ['goal', 'success', 'area', 'configuration', 'phases', 'safety']) setProse(p, s, 'text', 'operator');
+  p.findings = [{ id: 'v1', slot: 'phases', kind: 'inconsistency', severity: 'error', text: 'p7 sees half the lawn', source: 'validator' }];
+  assert.throws(() => approve(p), /finding v1/);
+  assert.throws(() => waiveFinding(p, 'v1', '  '), /needs a reason/);
+  assert.throws(() => waiveFinding(p, 'v9', 'x'), /no finding v9/);
+  waiveFinding(p, 'v1', 'the verify survey covers the whole lawn');
+  assert.match(renderMarkdown(p), /v1 \(inconsistency\) \(waived\)[\s\S]*waived by the operator:\* the verify survey covers the whole lawn/);
+  approve(p);
+  assert.match(p.history.at(-1)!.action, /approved \(waived: v1\)/);
+});
+
+test('the operator can mark a configuration need as provided; an approved plan goes back to draft', () => {
+  const p = newPlan('m1', 'x');
+  for (const s of ['goal', 'success', 'area', 'configuration', 'phases', 'safety']) setProse(p, s, 'text', 'operator');
+  setItems(p, 'configuration', [
+    { need: 'Battery endurance for 30 min', provided_by: null, status: 'unknown' },
+    { need: 'Track width', provided_by: null, status: 'unknown' },
+  ], 'planner');
+  approve(p);
+  assert.throws(() => provideNeed(p, 'width', ' '), /say how/);
+  assert.throws(() => provideNeed(p, 'nothing', 'x'), /matches 0/);
+  const c = provideNeed(p, 'battery', 'SITL battery, 40 min verified');
+  assert.equal(c.status, 'available');
+  assert.equal(c.provided_by, 'operator: SITL battery, 40 min verified');
+  assert.equal(p.status, 'draft');
 });

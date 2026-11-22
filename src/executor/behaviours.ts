@@ -211,6 +211,7 @@ async function driveLeg(
   const r = await ctx.client.goto(lat, lon, o.speed);
   if (r.ok === false) return { kind: 'failed', failure: `goto refused: ${r.error ?? 'unknown'}` };
   const deadline = ctx.now() + timeoutMs;
+  let stillSince: number | null = null;
   for (;;) {
     await ctx.sleep(ctx.pollMs);
     const st = await ctx.guard();
@@ -234,8 +235,44 @@ async function driveLeg(
       }
     }
     const d = distanceM(t.lat, t.lon, lat, lon);
-    if (d <= o.radius && (t.groundspeed ?? 0) < 0.3) return { kind: 'done', detail: `arrived, ${d.toFixed(1)} m from target` };
+    if (d <= o.radius) {
+      // Within the step's radius: stop here. ArduPilot would carry on to the point itself, so a
+      // stand-off radius (look at a pile from 2.5 m) only holds if we stop the rover ourselves.
+      if ((t.groundspeed ?? 0) >= 0.3) await ctx.client.stop();
+      return { kind: 'done', detail: `arrived, ${d.toFixed(1)} m from target` };
+    }
+    // ArduPilot counts a position target as reached within WP_RADIUS and parks there; when that
+    // is wider than the step's radius the rover stops short. Close the rest with velocity.
+    if (p && (t.groundspeed ?? 0) < 0.05) {
+      stillSince ??= ctx.now();
+      if (ctx.now() - stillSince >= 3000) {
+        ctx.log('close_in', { left_m: +d.toFixed(2), why: 'stopped short of the target (vehicle WP_RADIUS wider than the step radius?)' });
+        return closeIn(ctx, lat, lon, o.radius, Math.min(o.speed, 0.3), deadline, timeoutMs);
+      }
+    } else {
+      stillSince = null;
+    }
     if (ctx.now() > deadline) return { kind: 'failed', failure: `did not arrive within ${Math.round(timeoutMs / 1000)} s, ${d.toFixed(1)} m left` };
+  }
+}
+
+/** Drive the last stretch to a point with body-velocity setpoints (turn toward it, then creep). */
+async function closeIn(ctx: Ctx, lat: number, lon: number, radius: number, speed: number, deadline: number, timeoutMs: number): Promise<StepOutcome> {
+  for (;;) {
+    const st = await ctx.guard();
+    const p = poseOf(st);
+    if (!p) return { kind: 'failed', failure: 'no position telemetry' };
+    const d = distanceM(p.lat, p.lon, lat, lon);
+    if (d <= radius) {
+      await ctx.client.stop();
+      return { kind: 'done', detail: `arrived, ${d.toFixed(1)} m from target (closed in with velocity)` };
+    }
+    if (ctx.now() > deadline) return { kind: 'failed', failure: `did not arrive within ${Math.round(timeoutMs / 1000)} s, ${d.toFixed(1)} m left` };
+    const err = relBearing(p, lat, lon);
+    const yaw = Math.max(-0.5, Math.min(0.5, rad(err) * 1.5));
+    const forward = Math.abs(err) < 25 ? Math.min(speed, d) : 0;
+    const e = await nudge(ctx, forward, yaw, 0.5);
+    if (e) return { kind: 'failed', failure: `velocity refused: ${e}` };
   }
 }
 

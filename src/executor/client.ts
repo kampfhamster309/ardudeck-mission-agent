@@ -28,7 +28,7 @@ export class HttpAgentClient implements AgentClient {
       method: body === undefined ? 'GET' : 'POST',
       headers: { 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: AbortSignal.timeout(Math.ceil(timeoutMs)), // must be an integer (a fractional turn chunk gives e.g. 10415.9)
     });
     const data = (await res.json()) as T & { error?: string };
     if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);

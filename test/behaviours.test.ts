@@ -21,6 +21,8 @@ class SimRover implements AgentClient, PerceptionClient {
   heading = 0; // deg
   speed = 0;
   goal: { east: number; north: number; speed: number } | null = null;
+  /** like ArduPilot's WP_RADIUS: a position target counts as reached (and the rover parks) within this */
+  wpRadius = 0.2;
   world: World;
   constructor(world: World) { this.world = world; }
 
@@ -39,7 +41,7 @@ class SimRover implements AgentClient, PerceptionClient {
       const de = this.goal.east - this.east;
       const dn = this.goal.north - this.north;
       const d = Math.hypot(de, dn);
-      if (d < 0.2) { this.goal = null; this.tick(0, 0, 0.1); continue; }
+      if (d < this.wpRadius) { this.goal = null; this.tick(0, 0, 0.1); continue; }
       const err = ((((Math.atan2(de, dn) * 180) / Math.PI - this.heading) + 540) % 360) - 180;
       const yaw = Math.max(-1, Math.min(1, (err * Math.PI) / 180 * 2));
       this.tick(Math.abs(err) < 30 ? Math.min(this.goal.speed, d) : 0, yaw, 0.1);
@@ -139,4 +141,33 @@ test('detour: a line through a keep-out circle gets a waypoint beside it, others
   assert.ok(Math.hypot(v.east - 5, v.north - 5) >= 2.39, JSON.stringify(v));
   assert.equal(detour(ll(0, 0), ll(10, 0), z), null); // passes 5 m away
   assert.equal(detour(ll(5, 5.5), ll(10, 5), z), null); // starts inside: that's a push into the zone
+});
+
+function gotoSpec(target: { lat: number; lon: number }, radius: number): MissionSpec {
+  const s = ballSpec();
+  return { ...s, steps: [{ id: 'p1', name: 'go', behaviour: 'goto', params: { target: { target: 't', ...target }, arrival_radius_m: radius }, exit: 'there', on_failure: 'hold', serves: ['s1'] }] };
+}
+
+async function runGoto(world: World, target: { lat: number; lon: number }, radius: number, wpRadius: number) {
+  const rover = new SimRover(world);
+  rover.wpRadius = wpRadius;
+  const events: MissionEvent[] = [];
+  const r = await runMission(gotoSpec(target, radius), {
+    client: rover, perception: rover, decide: async () => ({ action: 'hold', reason: 'test', by: 'policy' }),
+    log: (e) => events.push(e), now: () => rover.t, sleep: async (ms) => rover.advance(ms), pollMs: 300,
+  });
+  return { rover, events, r, d: Math.hypot(rover.east - local(target.lat, target.lon).east, rover.north - local(target.lat, target.lon).north) };
+}
+
+test('a stand-off radius is where the rover stops, not where ArduPilot would', async () => {
+  const { r, d } = await runGoto(new World([], { ...DEFAULT_CONFIG, seed: 1 }), ll(0, 8), 2.5, 0.2);
+  assert.equal(r.status, 'completed');
+  assert.ok(d > 2.0 && d <= 2.6, `stopped ${d.toFixed(2)} m from the target`);
+});
+
+test('stopped short by a wide vehicle WP_RADIUS: closes the rest with velocity', async () => {
+  const { r, d, events } = await runGoto(new World([], { ...DEFAULT_CONFIG, seed: 1 }), ll(3, 8), 0.5, 3.0);
+  assert.equal(r.status, 'completed', JSON.stringify(r.steps));
+  assert.ok(d <= 0.6, `ended ${d.toFixed(2)} m from the target`);
+  assert.ok(events.some((e) => e.type === 'close_in'));
 });

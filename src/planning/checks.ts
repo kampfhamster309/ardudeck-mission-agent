@@ -52,6 +52,13 @@ export function runChecks(plan: MissionPlan, caps: Caps): Finding[] {
     } else if (b.status !== 'verified') {
       (unbuilt[p.behaviour] ??= []).push(p.id);
     }
+    // places must be named targets of the area (resolved to coordinates when compiling)
+    const targetNames = (area.targets ?? []).map((t) => t.name);
+    for (const [k, v] of Object.entries(p.params ?? {})) {
+      if (['target', 'destination', 'waypoint', 'align_to'].includes(k) && typeof v === 'string' && !targetNames.includes(v)) {
+        add({ slot: 'phases', kind: 'inconsistency', severity: 'error', text: `phase ${p.id}: ${k} "${v}" is not one of the area's targets (${targetNames.join(', ') || 'none'})` });
+      }
+    }
     // perception rule: the Ferret is for close work only, never search
     if (/survey|search|scan|find/i.test(`${p.behaviour} ${p.name}`) && /ferret|depth/i.test(JSON.stringify(p.params ?? {}))) {
       add({ slot: 'phases', kind: 'infeasibility', severity: 'error', text: `phase ${p.id} searches with the depth camera; search is the C270's job, the Ferret is close work only (150-700 mm)`, evidence: 'capabilities: sensors.depth_ferret_pro.role' });

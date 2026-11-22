@@ -67,6 +67,7 @@ test('refuses with blockers while anything is not executable', () => {
   p.status = 'draft';
   const phases = p.sections.phases.items as any[];
   phases.push({ id: 'p3', name: 'push', behaviour: 'push_to', params: { target: 'drop corner (pending operator)', speed_mps: 1.0 }, exit_condition: 'x', on_failure: 'y', serves: ['s9'] });
+  phases.push({ id: 'p4', name: 'approach', behaviour: 'goto', params: { align_to: 'object' }, exit_condition: 'x', on_failure: 'y', serves: [] });
   (p.sections.configuration.items as any[]).push({ need: 'front plow', provided_by: null, status: 'missing' });
   const caps = { ...readyCaps, vehicle_config: { fs_gcs_enable: { value: 0 } }, power: { battery_monitoring: { value: false } }, drive: {} };
   const r = compileSpec(p, caps, { sites: {} });
@@ -80,9 +81,24 @@ test('refuses with blockers while anything is not executable', () => {
   has(/needs "front plow", which is missing/);
   has(/phase p3: behaviour "push_to" is planned/);
   has(/phase p3: parameter "target" is a placeholder/);
+  has(/phase p4: parameter "align_to" names "object", which is not a target/);
   has(/phase p3: speed 1 m\/s is above the mission limit 0.5/);
   has(/phase p3: serves unknown success criterion "s9"/);
   has(/FS_GCS_ENABLE must be 1/);
   has(/battery monitoring is off/);
   has(/not confirmed driven by the Pixhawk/);
+});
+
+test('the pre-flight asks the operator to re-check what they vouched for and waived', () => {
+  const p = drivePlan();
+  p.status = 'draft';
+  (p.sections.configuration.items as any[]).push({ need: 'waypoint radius 0.5 m', provided_by: 'operator: the executor enforces its own radius', status: 'available' });
+  p.findings = [{ id: 'v3', slot: 'phases', kind: 'inconsistency', severity: 'error', text: 'WP_RADIUS is not harmless for p7a', source: 'validator', waived: { reason: 'moot: goto stops at its own radius', at: '' } }];
+  p.status = 'approved';
+  const r = compileSpec(p, readyCaps, sites);
+  assert.ok(r.ok, r.ok ? '' : r.blockers.join('\n'));
+  const pf = r.spec.preflight.join('\n');
+  assert.match(pf, /Check what you vouched for: "waypoint radius 0.5 m" \(the executor enforces its own radius\)/);
+  assert.match(pf, /Waived finding v3: WP_RADIUS is not harmless for p7a You accepted it because: moot/);
+  assert.match(renderSpecMarkdown(r.spec), /## Operator pre-flight[\s\S]*- \[ \] Waived finding v3/);
 });

@@ -1,6 +1,6 @@
 // The LLM at a decision point: the spec briefing plus what went wrong -> retry/skip/hold/abort.
 
-import { readFileSync } from 'node:fs';
+import { loadPrompt } from '../planning/prompts.ts';
 import { renderSpecMarkdown } from '../planning/spec.ts';
 import { toolLoop, type ChatFn } from '../planning/llm.ts';
 import type { DecideFn, Decision, DecisionAction } from './executor.ts';
@@ -18,7 +18,7 @@ function describeTelemetry(t: Record<string, unknown> | undefined): string {
 }
 
 export function llmDecider(chat: ChatFn, log?: (s: string) => void): DecideFn {
-  const system = readFileSync(new URL('../../prompts/decision.md', import.meta.url), 'utf-8');
+  const system = loadPrompt('decision');
   return async ({ spec, step, attempt, maxRetries, failure, status, object }) => {
     let decision: Decision | null = null;
     const user = [

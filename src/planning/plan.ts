@@ -69,6 +69,8 @@ export interface Finding {
   text: string;
   evidence?: string;
   source: 'check' | 'validator';
+  /** the operator accepted this finding as it stands; a waived error no longer blocks approval */
+  waived?: { reason: string; at: string };
 }
 
 export interface HistoryEntry { at: string; by: Author | 'validator'; action: string }
@@ -222,15 +224,49 @@ export function approvalBlockers(plan: MissionPlan): string[] {
   const out: string[] = [];
   for (const s of SLOTS) if (!plan.sections[s].prose.trim()) out.push(`section "${SECTION_TITLES[s]}" is empty`);
   for (const q of plan.questions) if (!q.answer) out.push(`question ${q.id} is unanswered`);
-  for (const f of plan.findings) if (f.severity === 'error') out.push(`finding ${f.id} (${f.kind}): ${f.text}`);
+  for (const f of plan.findings) if (f.severity === 'error' && !f.waived) out.push(`finding ${f.id} (${f.kind}): ${f.text}`);
   return out;
+}
+
+/**
+ * The operator accepts a finding as it stands, with a reason (kept in the plan and its history).
+ * A fresh validation replaces all findings, so a waiver lasts until the next validator pass.
+ */
+export function waiveFinding(plan: MissionPlan, id: string, reason: string): Finding {
+  if (plan.status === 'approved') throw new PlanEditError('the plan is approved; findings are settled');
+  const f = plan.findings.find((x) => x.id === id);
+  if (!f) throw new PlanEditError(`no finding ${id} (have: ${plan.findings.map((x) => x.id).join(', ') || 'none'})`);
+  if (!reason.trim()) throw new PlanEditError('a waiver needs a reason');
+  f.waived = { reason: reason.trim(), at: new Date().toISOString() };
+  touch(plan, 'operator', `waived finding ${id}: ${reason.trim()}`);
+  return f;
+}
+
+/**
+ * The operator states that a configuration need is met, and how (e.g. "parameter set and checked
+ * in SITL"). Changes the plan's content, so an approved plan goes back to draft for re-approval.
+ */
+export function provideNeed(plan: MissionPlan, match: string, how: string): ConfigItem {
+  if (!how.trim()) throw new PlanEditError('say how the need is provided');
+  const items = (plan.sections.configuration.items ?? []) as ConfigItem[];
+  const hits = items.filter((c) => c.need.toLowerCase().includes(match.toLowerCase()));
+  if (hits.length !== 1) {
+    throw new PlanEditError(`"${match}" matches ${hits.length} configuration needs${hits.length ? `: ${hits.map((c) => c.need).join('; ')}` : ''}`);
+  }
+  const c = hits[0]!;
+  c.status = 'available';
+  c.provided_by = `operator: ${how.trim()}`;
+  if (plan.status === 'approved') plan.status = 'draft';
+  touch(plan, 'operator', `provided "${c.need}": ${how.trim()}`);
+  return c;
 }
 
 export function approve(plan: MissionPlan): void {
   const blockers = approvalBlockers(plan);
   if (blockers.length) throw new PlanEditError(`can't approve:\n- ${blockers.join('\n- ')}`);
   plan.status = 'approved';
-  touch(plan, 'operator', 'approved');
+  const waived = plan.findings.filter((f) => f.waived).map((f) => f.id);
+  touch(plan, 'operator', waived.length ? `approved (waived: ${waived.join(', ')})` : 'approved');
 }
 
 export function reopen(plan: MissionPlan): void {
@@ -274,7 +310,9 @@ export function renderMarkdown(plan: MissionPlan): string {
       lines.push('');
     }
     for (const f of plan.findings.filter((x) => x.slot === slot)) {
-      lines.push(`> **${f.severity.toUpperCase()} ${f.id} (${f.kind}):** ${f.text}${f.evidence ? ` *(${f.evidence})*` : ''}`, '');
+      lines.push(`> **${f.severity.toUpperCase()} ${f.id} (${f.kind})${f.waived ? ' (waived)' : ''}:** ${f.text}${f.evidence ? ` *(${f.evidence})*` : ''}`);
+      if (f.waived) lines.push(`> *waived by the operator:* ${f.waived.reason}`);
+      lines.push('');
     }
   };
   for (const s of SLOTS) {

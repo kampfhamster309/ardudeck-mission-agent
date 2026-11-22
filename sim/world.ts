@@ -22,7 +22,8 @@ export interface Detection {
 
 export interface WorldConfig {
   rover: { length_m: number; width_m: number };
-  plow: { fitted: boolean; width_m: number; depth_m: number };
+  /** width_m: the mouth (narrowest, at the back wall); entry_width_m: the opening at the front edge (a funnel when wider). */
+  plow: { fitted: boolean; width_m: number; depth_m: number; entry_width_m?: number };
   camera: { hfov_deg: number; min_m: number; max_m: number; bearing_noise_deg: number; range_noise_frac: number; p_detect: number };
   ferret: { enabled: boolean; hfov_deg: number; min_m: number; max_m: number; noise_m: number; back_offset_m: number };
   seed: number;
@@ -90,10 +91,16 @@ export class World {
       const r = b.r;
       // generous catch zone: telemetry arrives at a few Hz, so the rover can move several cm
       // between two poses and must not "tunnel" past a ball it is pushing
-      if (plow.fitted && x > front - Math.max(r, 0.15) && x < front + plow.depth_m && Math.abs(y) < plow.width_m / 2) {
-        // inside the U: back wall at the front edge, arms at +-width/2
+      // a mouth narrower than the ball can't take it in: it acts like a flat front
+      const usable = plow.fitted && plow.width_m > 2 * r + 0.005 && plow.depth_m > r;
+      // allowed width at a distance ahead of the back wall: the mouth at the wall, widening
+      // linearly to the entry width at the front edge (a funnel guides the ball inwards)
+      const entry = Math.max(plow.entry_width_m ?? plow.width_m, plow.width_m);
+      const widthAt = (ahead: number) => plow.width_m + (entry - plow.width_m) * Math.max(0, Math.min(1, ahead / plow.depth_m));
+      if (usable && x > front - Math.max(r, 0.15) && x < front + plow.depth_m && Math.abs(y) < widthAt(x - front) / 2) {
+        // inside the U / funnel: back wall at the front edge, arms closing in towards it
         x = Math.max(x, front + r);
-        const lim = plow.width_m / 2 - r;
+        const lim = widthAt(x - front - r) / 2 - r;
         y = Math.max(-lim, Math.min(lim, y));
       } else if (Math.abs(y) < W / 2 + r && x > -L / 2 - r && x < front + r) {
         // touching the body or the bare front

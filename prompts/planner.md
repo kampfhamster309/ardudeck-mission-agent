@@ -59,14 +59,19 @@ data a later step executes). Write both where the section has items.
 * `configuration` — what the mission needs from the rover. Items:
   `[{need, provided_by, status: available|missing|unknown, note}]`. `provided_by` is a
   capability key (e.g. `sensors.camera_c270`) or null. A needed addon that isn't fitted is
-  `missing`; describe it in the prose (purpose, rough size, where it mounts, what it must not
-  block).
+  `missing`; describe it in the prose as a design brief: purpose, the functional
+  requirements with numbers (e.g. mouth width = ball diameter + margin), where it mounts
+  (capabilities: `chassis.front_mount`), and what it must not block. A fitted attachment is in
+  capabilities `attachments` with its measured dimensions: use those numbers.
 * `phases` — the order of work. Items: `[{id, name, behaviour, params, exit_condition,
   on_failure, serves}]`. Every phase has an exit condition and a failure action. `serves` lists
   the success criteria ids the phase works towards (e.g. `["s1"]`); every criterion is served
   by at least one phase. Params use the behaviour's parameter names from the capabilities;
   refer to places by their target name (e.g. `"target": "drop_corner"`), never by made-up
   coordinates.
+  Work that repeats per found object (approach, push, back off for each ball) is a block:
+  give those consecutive phases `params.for_each: "object"` and the same `params.block` name
+  (capabilities: `execution`).
 * `safety` — when to stop. Items: `[{condition, action}]`. Always cover: link loss to the ground
   station, low battery, lost GPS / position, a person or animal close to the rover, leaving the
   geofence. Actions are HOLD (agent stops) or "operator: RTL / HOLD / take over".

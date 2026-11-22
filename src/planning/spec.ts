@@ -47,6 +47,9 @@ export interface MissionSpec {
 
 export type CompileResult = { ok: true; spec: MissionSpec } | { ok: false; blockers: string[] };
 
+/** Parameters that name a place: their value must be one of the area's targets. */
+const TARGET_PARAMS = new Set(['target', 'destination', 'waypoint', 'align_to']);
+
 const PLACEHOLDER = /\b(pending|tbd|to be (decided|confirmed|measured|set|defined)|unknown|placeholder)\b/i;
 
 export function planHash(plan: MissionPlan): string {
@@ -148,12 +151,24 @@ export function compileSpec(plan: MissionPlan, caps: Caps, sites: SitesFile = {}
       'Place the rover inside the geofence, power it up, check the camera stream and the LiDAR.',
       `Apply the mission's geofence proposal in Ardudeck (${(geofence as LatLon[]).length} points) and enable the fence.`,
       'Confirm FS_GCS_ENABLE=1 and the battery level in Ardudeck.',
+      // What the operator vouched for while planning: re-checked here, against the real vehicle,
+      // because a waiver or an assurance made at the desk can be wrong (WP_RADIUS was, once).
+      ...((s.configuration.items ?? []) as ConfigItem[])
+        .filter((c) => c.provided_by?.startsWith('operator:'))
+        .map((c) => `Check what you vouched for: "${c.need}" (${c.provided_by!.replace(/^operator:\s*/, '')}). Is that set and true on this vehicle?`),
+      ...plan.findings.filter((f) => f.waived)
+        .map((f) => `Waived finding ${f.id}: ${short(f.text)} You accepted it because: ${f.waived!.reason} Does that still hold on this vehicle?`),
       'Arm, switch to GUIDED to hand over. Any other mode takes control back.',
     ],
     steps,
     aborts,
   };
   return { ok: true, spec };
+}
+
+function short(text: string, n = 200): string {
+  const t = text.replace(/\s+/g, ' ').trim();
+  return t.length <= n ? t : `${t.slice(0, n - 1)}…`;
 }
 
 /** Replace target names with coordinates; refuse nulls and placeholder text. */
@@ -165,6 +180,10 @@ function resolveParams(params: Record<string, unknown>, targets: MissionSpec['ta
       const t = targets[v];
       if (t) { out[k] = { target: v, lat: t.lat, lon: t.lon }; continue; }
       if (PLACEHOLDER.test(v)) { problem(`parameter "${k}" is a placeholder ("${v}")`); continue; }
+      if (TARGET_PARAMS.has(k)) {
+        problem(`parameter "${k}" names "${v}", which is not a target (targets: ${Object.keys(targets).join(', ') || 'none'})`);
+        continue;
+      }
     }
     if (typeof v === 'object' && !Array.isArray(v)) {
       out[k] = resolveParams(v as Record<string, unknown>, targets, (msg) => problem(`${k}.${msg.replace(/^parameter /, '')}`));
@@ -204,6 +223,8 @@ export function renderSpecMarkdown(spec: MissionSpec): string {
     L.push(`   - done when: ${st.exit}`);
     L.push(`   - on failure: ${st.on_failure}`);
   }
+  L.push('', '## Operator pre-flight (before the handover)', '');
+  for (const p of spec.preflight) L.push(`- [ ] ${p}`);
   L.push('', '## Abort at once', '');
   for (const a of spec.aborts) L.push(`- ${a.condition} → ${a.action}`);
   L.push('', 'You may only use the behaviours in the steps. Arming, mode changes and fence/mission changes are the operator\'s. If reality doesn\'t match this spec, stop (HOLD) and ask for a re-plan.', '');

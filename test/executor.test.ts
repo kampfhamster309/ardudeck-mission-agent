@@ -44,7 +44,7 @@ class FakeRover implements AgentClient {
   }
   async goto(lat: number, lon: number, speed = 1) { if (!this.drivable()) return { ok: false, error: 'vehicle is not in Guided mode' }; this.target = { lat, lon, speed }; return { ok: true }; }
   async velocity(_f: number, _y: number, seconds: number) { this.advance(seconds * 1000); return { ok: true, sent: seconds * 10, error: null }; }
-  async stop() { this.stops++; this.target = null; this.drift = null; return { ok: true }; }
+  async stop() { this.stops++; this.target = null; this.drift = null; this.speed = 0; return { ok: true }; }
 }
 
 const at = (north: number, east: number) => ({ lat: 51.5 + north / 111_320, lon: 7.5 + east / (111_320 * Math.cos((51.5 * Math.PI) / 180)) });
@@ -150,4 +150,19 @@ test('classifies which abort conditions the executor can watch', () => {
   ] }));
   assert.equal(c.monitored.length, 3);
   assert.deepEqual(c.unmonitored, ['Battery low']);
+});
+
+test('a mission held and resumed is scored over all its runs', async () => {
+  const { mergeRuns, scoreCriteria } = await import('../src/executor/executor.ts');
+  const s = spec([
+    { id: 'p1', name: 'a', behaviour: 'goto', params: {}, exit: 'x', on_failure: 'hold', serves: ['s1'] },
+    { id: 'p2', name: 'b', behaviour: 'goto', params: {}, exit: 'x', on_failure: 'hold', serves: ['s1'] },
+    { id: 'p3', name: 'c', behaviour: 'goto', params: {}, exit: 'x', on_failure: 'hold', serves: ['s1'] },
+  ]);
+  const run1 = [{ id: 'p1', outcome: 'done' as const, attempts: 1 }, { id: 'p2', outcome: 'failed' as const, attempts: 1 }];
+  const run2 = [{ id: 'p2', outcome: 'done' as const, attempts: 1 }, { id: 'p3', outcome: 'done' as const, attempts: 1 }];
+  assert.equal(scoreCriteria(s, run2)[0]!.all_steps_done, false); // p1 isn't in the resumed run
+  const merged = mergeRuns([run1, run2]);
+  assert.deepEqual(merged.map((r) => `${r.id}:${r.outcome}`), ['p1:done', 'p2:done', 'p3:done']);
+  assert.equal(scoreCriteria(s, merged)[0]!.all_steps_done, true);
 });
