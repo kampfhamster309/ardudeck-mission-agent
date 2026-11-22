@@ -6,6 +6,7 @@ import { runMission, type DecideFn, type MissionEvent } from '../src/executor/ex
 import type { AgentClient, AgentStatus } from '../src/executor/client.ts';
 import type { PerceptionClient } from '../src/executor/perception.ts';
 import type { MissionSpec } from '../src/planning/spec.ts';
+import { approachBehaviour, ObjectRegistry, type Ctx } from '../src/executor/behaviours.ts';
 import { DEFAULT_CONFIG, World, type WorldConfig } from '../sim/world.ts';
 
 const O = { lat: 51.5, lon: 7.5 };
@@ -23,6 +24,8 @@ class SimRover implements AgentClient, PerceptionClient {
   goal: { east: number; north: number; speed: number } | null = null;
   /** like ArduPilot's WP_RADIUS: a position target counts as reached (and the rover parks) within this */
   wpRadius = 0.2;
+  /** turn rate limit in position mode, rad/s (a skid-steer pivots slowly) */
+  maxYawRate = 1;
   world: World;
   constructor(world: World) { this.world = world; }
 
@@ -43,7 +46,7 @@ class SimRover implements AgentClient, PerceptionClient {
       const d = Math.hypot(de, dn);
       if (d < this.wpRadius) { this.goal = null; this.tick(0, 0, 0.1); continue; }
       const err = ((((Math.atan2(de, dn) * 180) / Math.PI - this.heading) + 540) % 360) - 180;
-      const yaw = Math.max(-1, Math.min(1, (err * Math.PI) / 180 * 2));
+      const yaw = Math.max(-this.maxYawRate, Math.min(this.maxYawRate, (err * Math.PI) / 180 * 2));
       this.tick(Math.abs(err) < 30 ? Math.min(this.goal.speed, d) : 0, yaw, 0.1);
     }
   }
@@ -148,9 +151,11 @@ function gotoSpec(target: { lat: number; lon: number }, radius: number): Mission
   return { ...s, steps: [{ id: 'p1', name: 'go', behaviour: 'goto', params: { target: { target: 't', ...target }, arrival_radius_m: radius }, exit: 'there', on_failure: 'hold', serves: ['s1'] }] };
 }
 
-async function runGoto(world: World, target: { lat: number; lon: number }, radius: number, wpRadius: number) {
+async function runGoto(world: World, target: { lat: number; lon: number }, radius: number, wpRadius: number, heading = 0, maxYawRate = 1) {
   const rover = new SimRover(world);
   rover.wpRadius = wpRadius;
+  rover.heading = heading;
+  rover.maxYawRate = maxYawRate;
   const events: MissionEvent[] = [];
   const r = await runMission(gotoSpec(target, radius), {
     client: rover, perception: rover, decide: async () => ({ action: 'hold', reason: 'test', by: 'policy' }),
@@ -170,4 +175,33 @@ test('stopped short by a wide vehicle WP_RADIUS: closes the rest with velocity',
   assert.equal(r.status, 'completed', JSON.stringify(r.steps));
   assert.ok(d <= 0.6, `ended ${d.toFixed(2)} m from the target`);
   assert.ok(events.some((e) => e.type === 'close_in'));
+});
+
+test('turning in place at the start of a leg is not parking short: no close_in', async () => {
+  // target straight behind: the skid-steer pivots for several seconds at zero groundspeed
+  const { r, d, events } = await runGoto(new World([], { ...DEFAULT_CONFIG, seed: 1 }), ll(0, 6), 0.5, 0.2, 180, 0.4);
+  assert.equal(r.status, 'completed', JSON.stringify(r.steps));
+  assert.ok(d <= 0.6, `ended ${d.toFixed(2)} m from the target`);
+  assert.ok(!events.some((e) => e.type === 'close_in'), 'close_in fired while turning');
+});
+
+test('a ball mapped 2.4 m short along the line of sight is searched for, not dismissed', async () => {
+  // the neutral SITL run: obj3 came from two far sightings and sat 2.4 m from the real ball
+  const world = new World([{ id: 'b1', east: 0, north: 7.3, r: 0.03 }], { ...DEFAULT_CONFIG, seed: 3 });
+  const rover = new SimRover(world);
+  const objects = new ObjectRegistry();
+  const obj = objects.add(ll(0, 4.9).lat, ll(0, 4.9).lon, 5);
+  obj.sightings = 2;
+  const events: MissionEvent[] = [];
+  const ctx: Ctx = {
+    spec: ballSpec(), client: rover, perception: rover, objects, current: obj, ferretSeen: false, keepOut: [],
+    guard: () => rover.status(), log: (type, data) => events.push({ t: rover.t, type, ...data } as MissionEvent),
+    now: () => rover.t, sleep: async (ms) => rover.advance(ms), pollMs: 300,
+  };
+  const out = await approachBehaviour(ctx, { id: 'p3', name: 'approach', behaviour: 'approach', params: {}, exit: '', on_failure: 'retry', serves: [] });
+  const trace = events.map((e) => `${e.type} ${JSON.stringify(e)}`).join('\n');
+  assert.equal(out.kind, 'done', `${JSON.stringify(out)}\n${trace}`);
+  assert.ok(events.some((e) => e.type === 'approach_search_done' && e['found'] === true), trace);
+  const d = Math.hypot(rover.east - 0, rover.north - 7.3);
+  assert.ok(d < 0.7, `rover ended ${d.toFixed(2)} m from the ball`);
 });

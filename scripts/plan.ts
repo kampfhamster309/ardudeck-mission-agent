@@ -28,7 +28,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
-import { answerQuestion, approve, provideNeed, waiveFinding, newPlan, renderMarkdown, requestRefine, setProse, type MissionPlan } from '../src/planning/plan.ts';
+import { vaultDir } from '../src/vault/vault.ts';
+import { answerQuestion, approve, provideNeed, waiveFinding, newPlan, renderMarkdown, requestRefine, setProse, type ConfigItem, type MissionPlan } from '../src/planning/plan.ts';
 import { runPlannerRound, runValidation, type Context } from '../src/planning/agents.ts';
 import { formatTotals, llmConfigFromEnv, openAiChat, UsageMeter } from '../src/planning/llm.ts';
 import { compileSpec, renderSpecMarkdown, type SitesFile } from '../src/planning/spec.ts';
@@ -46,7 +47,7 @@ function context(): Context {
   const capabilitiesText = readFileSync(capsPath, 'utf-8');
   const sitesText = existsSync(sitesPath) ? readFileSync(sitesPath, 'utf-8') : '';
   return {
-    capabilitiesText, sitesText,
+    capabilitiesText, sitesText, vaultDir: vaultDir(),
     capabilities: parseYaml(capabilitiesText) as Record<string, unknown>,
     sites: (sitesText ? parseYaml(sitesText) : {}) as Record<string, unknown>,
   };
@@ -246,7 +247,14 @@ async function main() {
     }
     case 'design': {
       const plan = load(id!);
-      const needs = missingAttachments(plan);
+      // design <id> [need match] [operator note]: a named configuration item, whatever its status
+      // (e.g. one the plan chose to do without, designed for a future run)
+      const [match, note] = rest;
+      const items = (plan.sections.configuration.items ?? []) as ConfigItem[];
+      const needs = match
+        ? items.filter((c) => c.need.toLowerCase().includes(match.toLowerCase())).map((c) => (note ? { ...c, need: `${c.need}. Operator note: ${note}` } : c))
+        : missingAttachments(plan);
+      if (match && needs.length !== 1) { console.log(`"${match}" matches ${needs.length} configuration items, not 1`); process.exitCode = 2; break; }
       if (!needs.length) { console.log('the plan needs no attachment'); break; }
       const mcp = await solidcraft(join(missionDir, plan.id, 'addons'));
       try {

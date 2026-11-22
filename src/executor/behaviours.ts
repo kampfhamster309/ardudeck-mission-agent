@@ -208,10 +208,14 @@ async function driveLeg(
   const t0 = st0.telemetry;
   const d0 = t0.lat !== undefined && t0.lon !== undefined ? distanceM(t0.lat, t0.lon, lat, lon) : 0;
   const timeoutMs = (o.timeoutS ?? d0 / o.speed * 2.5 + 20) * 1000;
-  const r = await ctx.client.goto(lat, lon, o.speed);
+  const r = await gotoRetry(ctx, lat, lon, o.speed);
   if (r.ok === false) return { kind: 'failed', failure: `goto refused: ${r.error ?? 'unknown'}` };
   const deadline = ctx.now() + timeoutMs;
+  // parked = no speed AND no turning, after having driven on this leg (a skid-steer rover turns in
+  // place at zero groundspeed, and needs a moment to start: neither is ArduPilot parking short)
   let stillSince: number | null = null;
+  let stillHeading = 0;
+  let drove = false;
   for (;;) {
     await ctx.sleep(ctx.pollMs);
     const st = await ctx.guard();
@@ -222,14 +226,14 @@ async function driveLeg(
       const ask = await o.onPoll(st, p);
       if (ask) {
         // sidestep, then carry on to the original target
-        const r1 = await ctx.client.goto(ask.via.lat, ask.via.lon, o.speed);
+        const r1 = await gotoRetry(ctx, ask.via.lat, ask.via.lon, o.speed);
         if (r1.ok === false) return { kind: 'failed', failure: `goto refused: ${r1.error ?? 'unknown'}` };
         for (let i = 0; i < 60; i++) {
           await ctx.sleep(ctx.pollMs);
           const s2 = (await ctx.guard()).telemetry;
           if (s2.lat !== undefined && s2.lon !== undefined && distanceM(s2.lat, s2.lon, ask.via.lat, ask.via.lon) < 0.4) break;
         }
-        const r2 = await ctx.client.goto(lat, lon, o.speed);
+        const r2 = await gotoRetry(ctx, lat, lon, o.speed);
         if (r2.ok === false) return { kind: 'failed', failure: `goto refused: ${r2.error ?? 'unknown'}` };
         continue;
       }
@@ -243,8 +247,9 @@ async function driveLeg(
     }
     // ArduPilot counts a position target as reached within WP_RADIUS and parks there; when that
     // is wider than the step's radius the rover stops short. Close the rest with velocity.
-    if (p && (t.groundspeed ?? 0) < 0.05) {
-      stillSince ??= ctx.now();
+    if (p && p.speed >= 0.15) drove = true;
+    if (p && drove && p.speed < 0.05 && (stillSince === null || Math.abs(angleDiff(p.heading, stillHeading)) < 3)) {
+      if (stillSince === null) { stillSince = ctx.now(); stillHeading = p.heading; }
       if (ctx.now() - stillSince >= 3000) {
         ctx.log('close_in', { left_m: +d.toFixed(2), why: 'stopped short of the target (vehicle WP_RADIUS wider than the step radius?)' });
         return closeIn(ctx, lat, lon, o.radius, Math.min(o.speed, 0.3), deadline, timeoutMs);
@@ -254,6 +259,18 @@ async function driveLeg(
     }
     if (ctx.now() > deadline) return { kind: 'failed', failure: `did not arrive within ${Math.round(timeoutMs / 1000)} s, ${d.toFixed(1)} m left` };
   }
+}
+
+function angleDiff(a: number, b: number): number {
+  return ((a - b + 540) % 360) - 180;
+}
+
+/** goto, sent again once when the module refuses it for following a velocity setpoint too closely. */
+async function gotoRetry(ctx: Ctx, lat: number, lon: number, speed: number) {
+  const r = await ctx.client.goto(lat, lon, speed);
+  if (r.ok !== false || r.error !== 'too fast') return r;
+  await ctx.sleep(200);
+  return ctx.client.goto(lat, lon, speed);
 }
 
 /** Drive the last stretch to a point with body-velocity setpoints (turn toward it, then creep). */
@@ -511,6 +528,7 @@ export async function approachBehaviour(ctx: Ctx, step: SpecStep): Promise<StepO
   let seen = 0;
   let inViewUnseen = 0;
   let lastSource = '';
+  let searched = false;
   while (ctx.now() < deadline) {
     const st = await ctx.guard();
     const pose = poseOf(st);
@@ -542,6 +560,7 @@ export async function approachBehaviour(ctx: Ctx, step: SpecStep): Promise<StepO
       const predBearing = deg(Math.atan2(pred.right, pred.forward));
       if (pred.forward > 0.8 && pred.forward < 4 && Math.abs(predBearing) < 15) inViewUnseen++;
       if (seen === 0 && inViewUnseen >= 8) {
+        if (!searched) { searched = true; if (await searchAround(ctx, obj)) { unseen = 0; inViewUnseen = 0; continue; } }
         obj.status = 'skipped';
         return { kind: 'dismiss', reason: `nothing at ${obj.id}'s position although it is in view (${pred.forward.toFixed(1)} m ahead): a false sighting` };
       }
@@ -554,8 +573,10 @@ export async function approachBehaviour(ctx: Ctx, step: SpecStep): Promise<StepO
       }
       if (unseen > 30) {
         if (seen === 0) {
-          // never seen during the approach: it was moved (e.g. scooped up while surveying) or
-          // it was a false sighting; the verify survey checks the real outcome
+          // never seen during the approach: it was moved (e.g. scooped up while surveying, or
+          // deflected sideways by a push) or it was a false sighting; look around once first
+          if (!searched) { searched = true; if (await searchAround(ctx, obj)) { unseen = 0; inViewUnseen = 0; continue; } }
+          // the verify survey checks the real outcome
           obj.status = 'skipped';
           return { kind: 'dismiss', reason: `${obj.id} not found where expected (moved or a false sighting)` };
         }
@@ -569,6 +590,43 @@ export async function approachBehaviour(ctx: Ctx, step: SpecStep): Promise<StepO
     if (err) return { kind: 'failed', failure: `approach refused: ${err}` };
   }
   return { kind: 'failed', failure: `approach to ${obj.id} timed out` };
+}
+
+/**
+ * Turn once on the spot and look for the object near where it was expected. A position from a
+ * few far camera sightings can be metres off along the line of sight (range error grows with
+ * distance), and a ball a push deflected may lie beside the rover, outside the camera's view.
+ * Picks the detection closest to the expected position within SEARCH_RADIUS_M, unless it is
+ * closer to another known object. Updates the object's position; true when found.
+ */
+const SEARCH_RADIUS_M = 3.0;
+async function searchAround(ctx: Ctx, obj: TrackedObject): Promise<boolean> {
+  ctx.log('approach_search', { object: obj.id, sightings: obj.sightings });
+  const others = ctx.objects.objects.filter((o) => o !== obj);
+  let best: { lat: number; lon: number; d: number } | null = null;
+  const yawRate = 0.4;
+  const turns = Math.ceil((2 * Math.PI) / (yawRate * 0.5));
+  for (let i = 0; i < turns; i++) {
+    const st = await ctx.guard();
+    const pose = poseOf(st);
+    if (pose) {
+      for (const det of await look(ctx, st, ['ferret', 'camera'])) {
+        const w = bodyToLatLon(pose, det.forward_m, det.right_m);
+        const d = distanceM(w.lat, w.lon, obj.lat, obj.lon);
+        if (d > SEARCH_RADIUS_M) continue;
+        if (others.some((o) => distanceM(w.lat, w.lon, o.lat, o.lon) < d)) continue;
+        if (!best || d < best.d) best = { ...w, d };
+      }
+    }
+    const err = await nudge(ctx, 0, yawRate, 0.5);
+    if (err) break;
+  }
+  await ctx.client.stop();
+  if (!best) { ctx.log('approach_search_done', { object: obj.id, found: false }); return false; }
+  ctx.log('approach_search_done', { object: obj.id, found: true, moved_m: +best.d.toFixed(2) });
+  obj.lat = best.lat;
+  obj.lon = best.lon;
+  return true;
 }
 
 /**

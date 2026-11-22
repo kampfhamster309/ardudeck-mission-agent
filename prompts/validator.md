@@ -7,6 +7,12 @@ operator's named places with `read_sites`. The capability model is the only sour
 about the rover; every value has a status (`verified`, `measured`, `configured`, `spec`,
 `planned` = not built yet, `unknown` = nobody knows).
 
+When `vault_search` / `vault_read` are offered, search the experience vault (lessons the
+operator accepted from earlier missions, and run reports) for the plan's key actions and
+places. A plan that repeats something a lesson says failed, without saying why it will work
+this time, is a finding (cite the note as evidence). Sim lessons are hints about the real
+rover, not facts; the capability model still wins on rover facts.
+
 Report each problem with `report_finding {slot, kind, severity, text, evidence}`, then call
 `done`. `slot` is the section the problem is in (`goal`, `success`, `area`, `configuration`,
 `phases`, `safety`, or `general`). `evidence` names what proves it: a capability key with its

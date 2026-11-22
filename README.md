@@ -129,6 +129,7 @@ builds it with SolidCraft's MCP server (`solidcraft-cli mcp`):
 
 ```sh
 node scripts/plan.ts design red-balls                  # design missing attachments
+node scripts/plan.ts design red-balls "push pan" "note" # design one named need, whatever its status
 node scripts/plan.ts design-replay red-balls front_plow # rebuild from the transcript, no LLM
 node scripts/plan.ts fit red-balls ../missions/red-balls/addons/front_plow.json   # it's fitted: add to MISSION_CAPS
 ```
@@ -177,6 +178,7 @@ and the capability model, to see what the agents come up with on their own.
 | `MISSION_DESIGNER_VISION` | `1` | `0`: the designer gets no screenshots |
 | `MISSION_PRINT_BED_MM` | `220x220x250` | the printer's build volume, for checking the parts |
 | `MISSION_ATTACHMENTS` | `keywords` | which missing needs go to the designer: named add-ons, or `neutral` (every need nothing on the rover provides) |
+| `MISSION_VAULT` | `~/vaults/jetrover` | the experience vault for the planner, validator and debrief; `off` disables it |
 | `MISSION_PROMPTS` | `prompts/` | folder with the agents' prompts |
 | `SOLIDCRAFT_CONNECT` | | `host:port` of a running SolidCraft (`--control`) |
 
@@ -257,7 +259,7 @@ node scripts/run.ts red-balls [--from p3] [--agent http://127.0.0.1:8765] [--no-
   | `stop` | zero velocity |
   | `survey` | lawnmower legs inside the geofence (2 m apart: the camera looks forward only), mapping camera detections to objects; keeps out of the target zone, sidesteps known objects, registers a ball it scoops up; `mode: verify` fails if anything is outside the target zone |
   | `hold_and_look` | turn in place and look around |
-  | `approach` | drive to the current object: stand-off point behind it (seen from `align_to`), then camera visual servoing, the Ferret for the last 0.7 m (without it, the last stretch is dead-reckoned); an object never seen during the approach is dismissed as moved or a false sighting |
+  | `approach` | drive to the current object: stand-off point behind it (seen from `align_to`), then camera visual servoing, the Ferret for the last 0.7 m (without it, the last stretch is dead-reckoned); an object not seen during the approach is first searched for with one turn on the spot (within 3 m of where it was mapped: far sightings can be metres off, a deflected ball may lie beside the rover), and only then dismissed as moved or a false sighting |
   | `push_to` | push the object in the plow mouth to a target, turning gently; fails if the Ferret sees the ball leave the plow |
   | `back_off` | reverse (1 m by default) |
 
@@ -283,6 +285,31 @@ model (45° horizontal, 0.5-6 m, noise, misses), a Ferret model (0.15-0.7 m, see
 mouth; `--no-ferret`) and pushing physics with or without a plow (`--no-plow`). It follows the
 rover through the control port and serves `GET /detections`, `GET /world` (ground truth, with
 each ball's distance from the drop corner) and `POST /reset`.
+
+### Experience vault and debrief
+
+Lessons from mission runs live in an Obsidian-compatible git vault (`MISSION_VAULT`, default
+`~/vaults/jetrover`; `off` disables it). Its `VAULT-INDEX.md` holds the map and the rules.
+
+- The planner and validator get `vault_search` and `vault_read` and see only accepted notes
+  (`status: active`). Each lesson says whether it was learned in the simulator or on the real
+  rover (`environment: sim | real`) and links the runs that show it.
+- After a run, the debrief writes a run report to `Runs/` and proposes lessons in `Rover/`,
+  `Behaviours/`, `Sites/` and `Strategy/`. Everything it writes is `status: proposed`; an edit
+  of an existing note goes to `Proposals/` with `edit_of:`. It commits in the vault.
+- The operator accepts a lesson in Obsidian by setting it to `active`, or merges the proposed
+  edit. Agents never mark a lesson active.
+- A lesson that is a hard fact about the vehicle belongs in the capability model too, with the
+  note as its `source`, so the validator enforces it.
+
+```sh
+node scripts/debrief.ts sim-red-balls --world http://127.0.0.1:8766 --note "what I saw"
+```
+
+It takes the latest run by default (or a run folder name), and includes the earlier runs a
+resumed run continues. `--world` adds the simulator's ground truth; `--env sim|real` overrides
+the environment, which otherwise is `sim` when `--world` is given or `MISSION_CAPS` points into
+a `sim/` folder. `--no-commit` leaves the vault uncommitted.
 
 ### The capability model
 
@@ -313,13 +340,15 @@ are skipped.
 | `src/main/gate.ts` | when the agent may move the rover |
 | `src/renderer/index.tsx` | status panel |
 | `src/planning/` | plan format, checks, LLM client, planner and validator, spec compiler, addon designer, MCP client, simulated operator |
-| `prompts/` | planner, validator, designer and decision prompts |
+| `prompts/` | planner, validator, designer, decision and debrief prompts |
 | `prompts-neutral/` | the same without hints about plows and pushing |
 | `src/executor/` | mission executor, behaviours, control-port and perception clients, LLM decision point |
 | `sim/world.ts` | simulated world: balls, camera and Ferret models, plow physics |
 | `scripts/sim-world.ts` | serves the simulated world for SITL |
 | `scripts/plan.ts` | planning CLI |
 | `scripts/run.ts` | executes a compiled mission |
+| `scripts/debrief.ts` | debriefs a run into the experience vault |
+| `src/vault/` | experience vault search/read, the debrief agent |
 | `scripts/sitl-mission.ts` | builds the SITL test mission |
 | `scripts/sim-setup.ts` | writes a mission's full-simulation inputs |
 | `esbuild.config.mjs` | builds `dist/` |

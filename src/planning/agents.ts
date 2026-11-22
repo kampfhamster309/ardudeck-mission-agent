@@ -6,6 +6,7 @@ import {
   type Finding, type FindingKind, type MissionPlan,
 } from './plan.ts';
 import { runChecks } from './checks.ts';
+import { readNote, searchText } from '../vault/vault.ts';
 import { toolLoop, type ChatFn, type LoopResult, type ToolDef } from './llm.ts';
 
 export interface Context {
@@ -15,6 +16,8 @@ export interface Context {
   sites: Record<string, unknown>;
   capabilitiesText: string;
   sitesText: string;
+  /** The experience vault (accepted lessons from earlier runs), when there is one */
+  vaultDir?: string | null;
 }
 
 const prompt = (name: string) => loadPrompt(name);
@@ -33,6 +36,25 @@ function readTools(plan: MissionPlan, ctx: Context): ToolDef[] {
     {
       name: 'read_sites', description: 'Read the named places the operator has defined (areas, corners, home), with coordinates.', parameters: obj,
       run: () => ctx.sitesText.trim() || 'No sites defined yet. Ask the operator for any place the mission needs.',
+    },
+    ...(ctx.vaultDir ? vaultTools(ctx.vaultDir) : []),
+  ];
+}
+
+/** Read access to the experience vault: accepted lessons and run reports only. */
+export function vaultTools(dir: string, statuses?: string[]): ToolDef[] {
+  return [
+    {
+      name: 'vault_search',
+      description: 'Search the experience vault: lessons the operator accepted from earlier missions (rover, behaviours, sites, strategy) and run reports. Returns matching notes with a few lines each.',
+      parameters: { type: 'object', properties: { query: { type: 'string', description: 'words to look for, e.g. "push ball bare front"' } }, required: ['query'] },
+      run: (a) => searchText(dir, String(a['query'] ?? ''), statuses),
+    },
+    {
+      name: 'vault_read',
+      description: 'Read one vault note in full, by the path vault_search gave, e.g. "Behaviours/goto - arrival".',
+      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+      run: (a) => readNote(dir, String(a['path'] ?? '')),
     },
   ];
 }

@@ -24,6 +24,15 @@ Ground every statement in what is actually known. Before you touch the plan:
 3. `read_plan` — the current plan, including the operator's edits, answered questions and
    validator findings. Read it before your first edit and again whenever an edit is refused.
 
+4. `vault_search` / `vault_read` (when offered) — the experience vault: lessons the operator
+   accepted from earlier missions and the reports of earlier runs. Search it for the mission's
+   key actions and places (e.g. "push ball", "goto arrival", the site's name) before you
+   decide how to do them. A lesson says whether it was learned in the simulator or on the real
+   rover (`environment: sim|real`); a sim lesson about physics is a strong hint, not a fact
+   about the real rover. The capability model still wins on rover facts. When a lesson shapes
+   a decision, cite it in the prose with its link, e.g. "a bare front loses the ball within
+   2 s ([[Behaviours/push_to - bare front]], sim)".
+
 Cite the capability you rely on in the prose, in plain words with the key in brackets, e.g.
 "the C270 has a 55° diagonal field of view (sensors.camera_c270.field_of_view_diag_deg, spec)".
 
