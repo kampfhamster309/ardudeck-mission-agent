@@ -341,7 +341,7 @@ export async function stopBehaviour(ctx: Ctx): Promise<StepOutcome> {
  * Lawnmower legs inside the geofence, registering camera detections as objects.
  * params: spacing_m (2.0), margin_m (1.5), speed_mps, mode ("find" | "verify"),
  *         target + radius_m (objects there count as delivered; in verify mode, anything found
- *         outside it fails the step).
+ *         outside it fails the step), register_max_m (6: camera sightings further away are ignored).
  */
 export async function surveyBehaviour(ctx: Ctx, step: SpecStep): Promise<StepOutcome> {
   const p = step.params;
@@ -368,7 +368,12 @@ export async function surveyBehaviour(ctx: Ctx, step: SpecStep): Promise<StepOut
   const keepOut = zone ? { north: (zone.lat - lat0) * M_LAT, east: (zone.lon - lon0) * mLon(lat0), r: zoneR + 0.7 } : null;
   const waypoints: LatLon[] = [];
   let up = true;
-  for (let e = minE; e <= maxE + 1e-6; e += spacing) {
+  // legs evenly spread from one inset edge to the other, never wider apart than spacing_m (a
+  // step loop dropped the last leg when the geofence's lat/lon made the width a hair short)
+  // (5 cm of slack: lat/lon rounding makes a fence a few mm wider or narrower than meant)
+  const nLegs = maxE - minE < 0.05 ? 1 : Math.ceil((maxE - minE - 0.05) / spacing) + 1;
+  const legEast = Array.from({ length: nLegs }, (_, i) => (nLegs === 1 ? (minE + maxE) / 2 : minE + (i * (maxE - minE)) / (nLegs - 1)));
+  for (const e of legEast) {
     let segs: Array<[number, number]> = [[minN, maxN]];
     if (keepOut && Math.abs(e - keepOut.east) < keepOut.r) {
       const h = Math.sqrt(keepOut.r ** 2 - (e - keepOut.east) ** 2);
@@ -388,6 +393,11 @@ export async function surveyBehaviour(ctx: Ctx, step: SpecStep): Promise<StepOut
   if (!waypoints.length) return { kind: 'failed', failure: 'no survey legs fit inside the geofence' };
 
   const registry = verify ? new ObjectRegistry() : ctx.objects;
+  // register camera sightings out to the camera's detection range: a ball beside the neighbouring
+  // leg is only in the forward camera's view from far away (1.5 m to the side needs > 3.9 m with
+  // a 45° camera), and ArduPilot arcs into each leg, so the leg's own pass can miss it
+  const registerMax = num(p['register_max_m']) ?? 6;
+  let lastHeading: { h: number; t: number } | null = null;
   if (zone && !ctx.keepOut.some((k) => distanceM(k.lat, k.lon, zone.lat, zone.lon) < 0.5)) {
     ctx.keepOut.push({ lat: zone.lat, lon: zone.lon, r: zoneR + 0.7 });
   }
@@ -400,7 +410,12 @@ export async function surveyBehaviour(ctx: Ctx, step: SpecStep): Promise<StepOut
       speed, radius: 1.0,
       onPoll: async (st, pose) => {
         const dets = await look(ctx, st, ['camera', 'ferret']);
-        register(registry, pose, dets);
+        // while turning fast the frame's heading is uncertain: a sighting would be mapped metres
+        // off (a ghost object), so skip registering camera sightings then
+        const now = ctx.now();
+        const turnRate = lastHeading && now > lastHeading.t ? Math.abs(wrap(pose.heading - lastHeading.h)) / ((now - lastHeading.t) / 1000) : 0;
+        lastHeading = { h: pose.heading, t: now };
+        if (turnRate <= 20) register(registry, pose, dets, registerMax);
         // a ball in the plow mouth is being carried along: register it where it is, so a
         // scooped ball can't silently disappear from the count
         const inMouth = dets.find((d) => d.source === 'ferret' && d.forward_m < 0.45 && Math.abs(d.right_m) < 0.15);

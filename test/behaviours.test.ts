@@ -205,3 +205,35 @@ test('a ball mapped 2.4 m short along the line of sight is searched for, not dis
   const d = Math.hypot(rover.east - 0, rover.north - 7.3);
   assert.ok(d < 0.7, `rover ended ${d.toFixed(2)} m from the ball`);
 });
+
+function surveySpec(fence: Array<[number, number]>, spacing: number): MissionSpec {
+  const s = ballSpec();
+  const f = fence.map(([e, n]) => { const p = ll(e, n); return [+p.lat.toFixed(7), +p.lon.toFixed(7)] as [number, number]; });
+  return { ...s, geofence: f, steps: [{ id: 'p1', name: 'find', behaviour: 'survey', params: { spacing_m: spacing, margin_m: 1.5 }, exit: 'done', on_failure: 'hold', serves: ['s1'] }] };
+}
+
+async function runSurvey(world: World, spec: MissionSpec) {
+  const rover = new SimRover(world);
+  rover.maxYawRate = 0.35;
+  const events: MissionEvent[] = [];
+  const r = await runMission(spec, {
+    client: rover, perception: rover, decide: async () => ({ action: 'hold', reason: 'test', by: 'policy' }),
+    log: (e) => events.push(e), now: () => rover.t, sleep: async (ms) => rover.advance(ms), pollMs: 300,
+  });
+  return { r, events, objects: r.objects.map((o) => ({ ...local(o.lat, o.lon), sightings: o.sightings })) };
+}
+
+test('survey legs reach both inset edges even when the lat/lon fence is a hair narrow', async () => {
+  // the neutral SITL run: a 14 m lawn at 2.2 m spacing logged 5 legs, the strip by the east edge unsearched
+  const { events } = await runSurvey(new World([], { ...DEFAULT_CONFIG, seed: 1 }), surveySpec([[-2, -2], [11.996, -2], [11.996, 12], [-2, 12]], 2.2));
+  const s = events.find((e) => e.type === 'survey')!;
+  assert.equal(s['legs'], 6);
+});
+
+test('survey finds a ball 1.5 m beside its only leg (a sighting from beyond 4 m)', async () => {
+  const world = new World([{ id: 'b1', east: 3, north: 6, r: 0.03 }], { ...DEFAULT_CONFIG, seed: 2 });
+  // 3 m wide fence at margin 1.5: one leg, at east 1.5
+  const { objects } = await runSurvey(world, surveySpec([[0, -2], [3, -2], [3, 12], [0, 12]], 2.0));
+  const near = objects.filter((o) => o.sightings >= 2 && Math.hypot(o.east - 3, o.north - 6) < 0.8);
+  assert.equal(near.length, 1, JSON.stringify(objects));
+});
